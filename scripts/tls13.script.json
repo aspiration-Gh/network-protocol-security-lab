@@ -1,0 +1,573 @@
+{
+ "id": "tls13",
+ "notes": {
+  "legacy_version": {
+   "short": "写死的 0x0303，只为骗中间盒",
+   "more": "固定填 0x0303（TLS 1.2），是刻意撒谎：真实版本偏好放在 supported_versions 里。旧中间盒见到更高版本号会直接拒绝握手。",
+   "sec": "正因为这个字段被固定，剥掉 supported_versions 就能让双方回落到 1.2 而客户端毫无察觉——除非它检查 ServerHello.random 里的降级哨兵。"
+  },
+  "supported_versions (0x002b)": {
+   "short": "1.3 真正的版本协商，剥掉就降级",
+   "more": "1 字节列表长度加若干 2 字节版本号，按偏好降序，本例只有 0x0304。服务器在 ServerHello 里回写选定版本，取代报最高版本的旧做法。",
+   "sec": "中间人删掉这个扩展，服务器就只能按 legacy_version 走 1.2；检测手段是降级哨兵，不是这个字段本身。"
+  },
+  "key_share (0x0033)": {
+   "short": "第一个飞行就送出 ECDHE 的一半",
+   "more": "列表长度加若干 KeyShareEntry（组号、长度、公钥），本例是 x25519 的 32 字节公钥。客户端在第一个飞行就送出密钥交换的一半。",
+   "sec": "组号与长度必须严格校验，长度与实际不符是越界读的经典入口；它也把 ClientHello 撑大，容易跨过 MTU 被中间盒错误分片。"
+  },
+  "pre_shared_key (0x0029)": {
+   "short": "票据即凭证，必须是最后一个扩展",
+   "more": "identities（票据与混淆年龄）加 binders（对截断 transcript 的 HMAC）。必须排最后，因为 binder 覆盖它之前的所有字节。",
+   "sec": "票据是 bearer 凭证，泄露就能冒充会话；binder 只解决「有票」，不解决「是不是本人」，所以恢复会话仍需与应用层授权结合。"
+  },
+  "early_data (0x002a)": {
+   "short": "一个空扩展，开启全部重放风险",
+   "more": "空扩展，只表示接下来会发 0-RTT；真正上限 max_early_data_size 由服务器在票据里给出，收到 HelloRetryRequest 必须丢弃重发。",
+   "sec": "服务器此后必须假设紧随的应用数据可能被重放：0-RTT 既无前向安全，也无抗重放，因此只能承载幂等操作。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "密钥交换塞进第一个飞行：1-RTT 建连，0-RTT 恢复",
+   "lead": "这一幕只有两个包，都是 ClientHello：一个首次握手，一个带票据恢复。差别全在扩展里。",
+   "scenes": [
+    {
+     "name": "1-RTT 建连，然后 0-RTT 恢复",
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "ClientHello",
+       "hl": [
+        "legacy_version",
+        "supported_versions (0x002b)",
+        "key_share (0x0033)"
+       ],
+       "vals": {
+        "legacy_version": "0x0303（固定撒谎）",
+        "supported_versions (0x002b)": "0x0304 = TLS 1.3",
+        "key_share (0x0033)": "x25519 的 32 字节公钥"
+       },
+       "say": "第一个飞行就带上版本与 key_share：密钥交换不必再等一个往返。",
+       "sub": "legacy_version 写死 0x0303，只为骗过只认它的旧中间盒。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "ServerHello 回写",
+       "hl": [
+        "supported_versions (0x002b)",
+        "key_share (0x0033)",
+        "cipher_suites"
+       ],
+       "vals": {
+        "supported_versions (0x002b)": "0x0304（选定）",
+        "key_share (0x0033)": "服务器回自己的公钥",
+        "cipher_suites": "0x1301（AES-128-GCM）"
+       },
+       "say": "服务器回自己的 key_share，双方立刻算出 ECDHE 共享秘密。",
+       "sub": "套件只剩 AEAD：密钥交换已从套件里剥离，静态 RSA 不存在了。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "加密飞行",
+       "hl": [
+        "Content Type",
+        "Record Length"
+       ],
+       "vals": {
+        "Content Type": "0x17（内含 EE/Certificate/Finished）",
+        "Record Length": "≤ 2^14"
+       },
+       "say": "ServerHello 之后的所有握手消息都被加密，外层伪装成应用数据记录。",
+       "sub": "中间设备看到 0x17 就以为业务开始了，协议僵化的抓手没了。"
+      },
+      {
+       "who": "客户端",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "HKDF",
+       "hl": [
+        "cipher_suites",
+        "Random"
+       ],
+       "vals": {
+        "cipher_suites": "0x1301 → HKDF-SHA256",
+        "Random": "参与 key schedule"
+       },
+       "say": "HKDF-Extract 把共享秘密压成定长密钥，Expand-Label 按用途分出各类密钥。",
+       "sub": "每个用途一个 label，同一份材料不会跨用途复用。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "带票据恢复",
+       "hl": [
+        "pre_shared_key (0x0029)",
+        "psk_key_exchange_modes (0x002d)"
+       ],
+       "vals": {
+        "pre_shared_key (0x0029)": "票据 + binder，必须是最后一个",
+        "psk_key_exchange_modes (0x002d)": "1 = psk_dhe_ke"
+       },
+       "say": "第二次连接带上票据：跳过证书，省掉一个完整往返。",
+       "sub": "psk_dhe_ke 表示恢复时仍做一次 ECDHE，前向安全才保得住。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "0-RTT 数据",
+       "hl": [
+        "early_data (0x002a)",
+        "Record Length"
+       ],
+       "vals": {
+        "early_data (0x002a)": "空扩展，声明「接着要发 0-RTT」",
+        "Record Length": "≤ max_early_data_size"
+       },
+       "say": "不等服务器回应，直接用 early key 把应用数据发出去——这就是 0-RTT。",
+       "sub": "代价就在这句话里：没有前向安全，也没有任何抗重放保证。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "openssl s_client -connect example.com:443 -tls1_3 -servername example.com",
+        "n": "只走 1.3：能看到 key_share 与之后全加密的握手飞行",
+        "s": "补充（openssl 不在 vault）"
+       },
+       {
+        "c": "openssl s_client -connect example.com:443 -tls1_3 -sess_out s.pem",
+        "n": "存下会话票据（NewSessionTicket），下一步用它做 0-RTT",
+        "s": "补充（openssl 不在 vault）"
+       },
+       {
+        "c": "openssl s_client -connect example.com:443 -tls1_3 -sess_in s.pem -early_data early.txt",
+        "n": "-early_data 真的发 0-RTT；服务器接受与否看 ServerHello 里的 early_data 指示",
+        "s": "补充（openssl 不在 vault）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection example.com -Port 443 -InformationLevel Detailed",
+        "n": "先确认 443 可达，再谈 1-RTT 与 0-RTT 的差别",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       },
+       {
+        "c": "Get-NetTCPConnection -RemotePort 443 | Select-Object -First 5 LocalPort,State",
+        "n": "本机到 443 的连接与状态，恢复会话时新建连接会明显更少",
+        "s": "《系统》PowerShell.md · Get-NetTCPConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "curl -v --tlsv1.3 https://example.com -o NUL",
+        "n": "需要 curl 后端支持 TLS 1.3；-v 会打出 TLSv1.3 与套件",
+        "s": "补充（Windows 内置 curl，需后端支持 1.3）"
+       },
+       {
+        "c": "netstat -ano | findstr :443",
+        "n": "连接与 PID，判断是不是同一进程在反复握手",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "0-RTT 省下的那个往返，正是抗重放能力所在",
+   "lead": "第一场攻击连解密都不用，字节照抄；第二场动的是扩展，不是版本号。",
+   "scenes": [
+    {
+     "name": "0-RTT 重放：一模一样的包，执行两次",
+     "steps": [
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "NewSessionTicket",
+       "hl": [
+        "pre_shared_key (0x0029)"
+       ],
+       "vals": {
+        "pre_shared_key (0x0029)": "票据＝PSK，寿命内可反复用"
+       },
+       "say": "首次握手完成后，服务器下发 NewSessionTicket：PSK 加 max_early_data_size。",
+       "sub": "票据是 bearer 凭证：谁拿着它，服务器就认谁。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "0-RTT 请求",
+       "hl": [
+        "early_data (0x002a)",
+        "pre_shared_key (0x0029)"
+       ],
+       "vals": {
+        "early_data (0x002a)": "开启 0-RTT",
+        "pre_shared_key (0x0029)": "同一张票据"
+       },
+       "say": "客户端拿票据发 0-RTT 请求：POST /transfer?amt=1000。",
+       "sub": "这条记录用 early key 加密，旁观者解不开，但能整段存下来。"
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "抓包",
+       "evil": true,
+       "hl": [
+        "Record Length",
+        "early_data (0x002a)"
+       ],
+       "vals": {
+        "Record Length": "原样保存字节",
+        "early_data (0x002a)": "这里标着有 0-RTT"
+       },
+       "say": "被动观察者不需要解密：把 ClientHello 与紧随的 0-RTT 记录一起存下。",
+       "sub": "重放只需要字节相同，不需要知道内容到底是什么。"
+      },
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "原样重放",
+       "evil": true,
+       "hl": [
+        "pre_shared_key (0x0029)",
+        "Record Length"
+       ],
+       "vals": {
+        "pre_shared_key (0x0029)": "票据仍在寿命内",
+        "Record Length": "字节一个不改"
+       },
+       "say": "服务器用同一 PSK 派生出同一 early key，解密必然成功。",
+       "sub": "协议层没有任何机制能区分「新请求」与「被重放的旧包」。"
+      },
+      {
+       "who": "服务器",
+       "to": "后端业务",
+       "pkt": 1,
+       "bubble": "重复执行",
+       "hl": [
+        "early_data (0x002a)"
+       ],
+       "vals": {
+        "early_data (0x002a)": "握手完成前就交付应用"
+       },
+       "say": "转账在握手完成前被执行了——服务器此时甚至还没验证客户端身份。",
+       "sub": "多节点部署时去重缓存不共享，同一请求能在每个节点各执行一次。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "openssl s_client -connect example.com:443 -tls1_3 -sess_in s.pem -early_data early.txt",
+        "n": "同一命令连跑两次：业务被重复执行就说明服务端没做去重",
+        "s": "补充（openssl 不在 vault）"
+       },
+       {
+        "c": "sudo tcpdump -ni any -w 0rtt.pcap 'tcp port 443'",
+        "n": "把 0-RTT 记录抓下来存盘，便于按原字节重放",
+        "s": "补充（抓包必备）"
+       },
+       {
+        "c": "sudo tcpreplay -i eth0 0rtt.pcap",
+        "n": "按原字节重放，观察服务端是否把同一请求执行两次",
+        "s": "补充（tcpreplay 不在 vault，重放需要它）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetTCPConnection -RemotePort 443 | Measure-Object | Select-Object Count",
+        "n": "每次重放都是一条新连接，连接数突增是重放的侧影",
+        "s": "《系统》PowerShell.md · Get-NetTCPConnection"
+       },
+       {
+        "c": "Test-NetConnection example.com -Port 443 -InformationLevel Detailed",
+        "n": "先排除网络问题造成的重试，再判是否重放",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "curl -v --tlsv1.3 --tls-max 1.3 https://example.com -o NUL",
+        "n": "先确认基础 1.3 通路；curl 的 0-RTT 还要显式开启",
+        "s": "补充（Windows 内置 curl）"
+       },
+       {
+        "c": "netstat -ano | findstr :443",
+        "n": "同一 PID 短时间内反复建连，值得单独看一眼",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    },
+    {
+     "name": "降级：把 supported_versions 从包里删掉",
+     "steps": [
+      {
+       "who": "中间人",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "截获 ClientHello",
+       "evil": true,
+       "hl": [
+        "legacy_version",
+        "supported_versions (0x002b)"
+       ],
+       "vals": {
+        "legacy_version": "0x0303",
+        "supported_versions (0x002b)": "0x0304（真实偏好）"
+       },
+       "say": "中间人的目标不是解密，而是让这次握手用不上 1.3。",
+       "sub": "版本偏好藏在扩展里，所以他要动扩展，不动 legacy_version。"
+      },
+      {
+       "who": "中间人",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "删扩展",
+       "evil": true,
+       "hl": [
+        "extensions_length",
+        "supported_versions (0x002b)",
+        "key_share (0x0033)"
+       ],
+       "vals": {
+        "extensions_length": "减 7 字节（含该扩展）",
+        "supported_versions (0x002b)": "已删除",
+        "key_share (0x0033)": "一并删除"
+       },
+       "say": "把 supported_versions 与 key_share 一起删掉再转发：1.3 的证据全没了。",
+       "sub": "服务器找不到 1.3 标识，只能按 0x0303 当 1.2 处理。"
+      },
+      {
+       "who": "服务器",
+       "to": "中间人",
+       "pkt": 0,
+       "bubble": "印上哨兵",
+       "hl": [
+        "Random",
+        "legacy_version"
+       ],
+       "vals": {
+        "Random": "末 8 字节 …44 4F 57 4E 47 52 44 01",
+        "legacy_version": "0x0303"
+       },
+       "say": "被迫协商到 1.2 时，服务器必须在 random 末 8 字节写入降级哨兵。",
+       "sub": "这是 RFC 8446 给客户端的报警器：DOWNGRD 加一个版本字节。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "若不检查",
+       "hl": [
+        "Random",
+        "cipher_suites"
+       ],
+       "vals": {
+        "Random": "哨兵被忽略",
+        "cipher_suites": "落到 1.2 的 CBC 套件"
+       },
+       "say": "客户端不查哨兵，就以为「服务器只是不支持 1.3」，握手照常成功。",
+       "sub": "接下来 BEAST、POODLE 这些 2014 年的问题全部复活。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "openssl s_client -connect example.com:443 -tls1_3 -groups X25519",
+        "n": "1.3 独占握手；失败说明服务端或链路把 1.3 摘掉了",
+        "s": "补充（openssl 不在 vault）"
+       },
+       {
+        "c": "sudo tcpdump -ni any -X 'tcp port 443 and tcp[((tcp[12]&0xf0)>>2)] = 0x16'",
+        "n": "-X 打十六进制：直接看 ClientHello 里 supported_versions 在不在",
+        "s": "补充（抓包必备）"
+       },
+       {
+        "c": "nmap --script ssl-enum-ciphers -p 443 example.com",
+        "n": "服务端到底支不支持 1.3，比客户端日志更可信",
+        "s": "补充（nmap NSE 脚本）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "[Net.ServicePointManager]::SecurityProtocol",
+        "n": "旧 .NET 默认不含 TLS1.3，配置错误会静默退到 1.2",
+        "s": "《系统》PowerShell.md · .NET 安全协议设置"
+       },
+       {
+        "c": "Test-NetConnection example.com -Port 443 -InformationLevel Detailed",
+        "n": "先排除通路问题，再判定是不是降级",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "curl -v --tlsv1.3 https://example.com -o NUL",
+        "n": "看输出里 SSL connection 用的是哪个版本",
+        "s": "补充（Windows 内置 curl）"
+       },
+       {
+        "c": "netsh http show sslcert",
+        "n": "IIS 侧绑定与协议配置，降级常从服务端配置开始",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "同一场重放与同一场降级各重放一遍，两处各被掐一次",
+   "lead": "0-RTT 的风险无法在协议层消除，只能在业务层收窄；降级则是客户端一个检查就能挡住。",
+   "scenes": [
+    {
+     "name": "幂等白名单 + 票据去重，客户端查哨兵",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "重放 0-RTT",
+       "evil": true,
+       "hl": [
+        "early_data (0x002a)",
+        "pre_shared_key (0x0029)"
+       ],
+       "vals": {
+        "early_data (0x002a)": "原样重放",
+        "pre_shared_key (0x0029)": "同一票据"
+       },
+       "say": "重放照旧：同一张票据、同一段字节，一个都不改。",
+       "sub": "防护的思路是让这次重放找不到可执行的东西。"
+      },
+      {
+       "who": "服务器",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "白名单拒绝",
+       "hl": [
+        "early_data (0x002a)"
+       ],
+       "vals": {
+        "early_data (0x002a)": "只对 GET/HEAD 接受"
+       },
+       "say": "只对幂等请求接受 early data：POST /transfer 被拒，退回 1-RTT。",
+       "sub": "0-RTT 省的是延迟，不该拿它去换「可能重复扣款」。"
+      },
+      {
+       "who": "服务器",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "票据单次 + 去重",
+       "hl": [
+        "pre_shared_key (0x0029)",
+        "psk_key_exchange_modes (0x002d)"
+       ],
+       "vals": {
+        "pre_shared_key (0x0029)": "票据单次使用，用后作废",
+        "psk_key_exchange_modes (0x002d)": "只允许 psk_dhe_ke"
+       },
+       "say": "票据标记单次使用，再按请求指纹在共享存储里去重，跨节点也拦得住。",
+       "sub": "只允许 psk_dhe_ke：恢复时仍做 ECDHE，前向安全不丢。"
+      },
+      {
+       "who": "中间人",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "再剥扩展",
+       "evil": true,
+       "hl": [
+        "supported_versions (0x002b)"
+       ],
+       "vals": {
+        "supported_versions (0x002b)": "删除"
+       },
+       "say": "降级再试一次：剥掉 supported_versions，让服务器回 1.2。",
+       "sub": "这次客户端会去看 ServerHello 的 random 末尾。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "abort",
+       "hl": [
+        "Random"
+       ],
+       "vals": {
+        "Random": "末 8 字节 = 44 4F 57 4E 47 52 44 01"
+       },
+       "say": "客户端发现哨兵立刻中止：我支持 1.3，却被降到了 1.2。",
+       "sub": "服务端再禁掉 1.2 的 CBC 与静态 RSA，降级才彻底没有收益。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "openssl s_client -connect example.com:443 -tls1_3 -sess_in s.pem -early_data early.txt",
+        "n": "复核：非幂等请求应当被推迟到 1-RTT 之后",
+        "s": "补充（openssl 不在 vault）"
+       },
+       {
+        "c": "openssl s_client -connect example.com:443 -tls1_2",
+        "n": "还能握到 1.2 说明降级通路仍开着：这是资产判断，不是漏洞",
+        "s": "补充（openssl 不在 vault）"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'tcp port 443 and tcp[((tcp[12]&0xf0)>>2)] = 0x17'",
+        "n": "0-RTT 记录外层也是 0x17，看时间点判断是否在握手中途就发了数据",
+        "s": "补充（抓包必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetTCPConnection -RemotePort 443 | Group-Object State",
+        "n": "按状态聚合：去重生效后不应出现大量短命连接",
+        "s": "《系统》PowerShell.md · Get-NetTCPConnection"
+       },
+       {
+        "c": "Test-NetConnection example.com -Port 443 -InformationLevel Detailed",
+        "n": "防护后复测：正常访问不能受影响",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "curl -v --tlsv1.3 https://example.com -o NUL",
+        "n": "收紧策略后复测握手版本，确认没有意外退化",
+        "s": "补充（Windows 内置 curl）"
+       },
+       {
+        "c": "netstat -ano | findstr :443",
+        "n": "复核连接分布，确认没有异常重建",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

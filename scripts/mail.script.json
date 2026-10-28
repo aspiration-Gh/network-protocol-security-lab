@@ -1,0 +1,614 @@
+{
+ "id": "mail",
+ "notes": {
+  "MAIL FROM": {
+   "short": "信封发件人，只是一句自称",
+   "more": "逆向路径，服务器退信时用它。它与首部 From 是两个独立字段，可以不一致。整条会话没有任何一步验证“你是不是这个地址的主人”。",
+   "sec": "邮件伪造的地基：服务器最多检查域名语法。"
+  },
+  "RCPT TO": {
+   "short": "实际投递对象，可多次出现",
+   "more": "每出现一次就是一个收件人，服务器逐个应答。它与首部 To 互不校验，“显示 A、投递给 B”在协议上完全合法。",
+   "sec": "密送、列表、转发都靠它；钓鱼也靠它。"
+  },
+  "EHLO": {
+   "short": "自报域名，不构成身份证明",
+   "more": "请求进入 ESMTP 扩展模式，服务器用多行 250 应答列出支持的能力。域名完全由客户端填写、不被校验。",
+   "sec": "常被用来探测服务器是否支持 STARTTLS 与 AUTH。"
+  },
+  "Return-Path": {
+   "short": "投递方写入，比 From 可信",
+   "more": "由最终投递的 MTA 依据信封 MAIL FROM 写入，收件人看不到，退信按它走。它是“别人替你写的字段”。",
+   "sec": "取证先看它：与首部 From 不一致即高度可疑。"
+  },
+  "Received": {
+   "short": "逐跳追加的真实来源链",
+   "more": "每个经手 MTA 在最上方追加一行，形成时间由早到晚的接力记录，含真实来源 IP 与所用协议。以制表符开头的续行属于同一字段。",
+   "sec": "只有你信任的那台 MTA 追加的那一行可靠，其上每一行都可伪造。"
+  },
+  "From": {
+   "short": "显示发件人，完全由发件人填",
+   "more": "纯展示用字段：显示名加地址。客户端多数只渲染显示名，地址被折叠或根本不显示，显示名可以写成任何机构。",
+   "sec": "写成 “PayPal Service” 而地址是 paypal-secure.example，是最典型的一类欺骗。"
+  },
+  "Subject": {
+   "short": "社工话术的主战场",
+   "more": "一句话主题，可含 MIME 编码字承载非 ASCII。它直接决定收件人是否点开，因此集中了制造紧迫感与指向权威的所有话术。",
+   "sec": "“24 小时内停用账户”这类措辞，是钓鱼的固定配方。"
+  },
+  "Message-ID": {
+   "short": "唯一标识，暴露生成方",
+   "more": "形如 <唯一串@生成方域名>，用于去重与串起会话。域名部分暴露了生成方，同一 ID 出现在多封不同内容的信里是批量伪造的痕迹。",
+   "sec": "多封信共用一个 Message-ID，就是群发的证据。"
+  },
+  "354": {
+   "short": "唯一的中间态应答",
+   "more": "3 开头既不是成功也不是失败，而是“继续说”。服务器在此之后进入数据模式，为可能到来的任意长度内容预留资源。",
+   "sec": "不设上限的实现可被单条连接写满磁盘。"
+  },
+  "PASS": {
+   "short": "明文口令，嗅探即得",
+   "more": "口令以完全明文发送，除 Base64 之外没有任何保护（它甚至不是 Base64）。同网段嗅探即可拿到账号口令。",
+   "sec": "用户常多处复用口令，一处泄露波及全部；只能靠 995 或 STARTTLS 兜。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "文本对话逐跳投递，信封管路由、首部管显示",
+   "lead": "先看一封信从提交到取回。注意信封与首部是两套地址，互不校验。",
+   "scenes": [
+    {
+     "name": "SMTP 投递 + POP3 取信",
+     "cmds": {
+      "linux": [
+       {
+        "c": "swaks --to bob@corp.example --server mail.bank.example --auth LOGIN --tls",
+        "n": "一次走完 EHLO/MAIL/RCPT/DATA，每步应答都打出来",
+        "s": "补充（vault 无 swaks，SMTP 会话调试必备）"
+       },
+       {
+        "c": "openssl s_client -connect mail.bank.example:25 -starttls smtp -quiet",
+        "n": "明文连上再升级，能亲眼看到 STARTTLS 前后差别",
+        "s": "补充（vault 无 openssl，STARTTLS 验证）"
+       },
+       {
+        "c": "dig +short TXT corp.example",
+        "n": "看该域发布了什么 SPF/DKIM 策略",
+        "s": "补充（vault 无 dig，查 TXT 策略）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Resolve-DnsName corp.example -Type TXT",
+        "n": "Windows 侧读该域的 TXT 策略记录",
+        "s": "补充（vault 未收录 Resolve-DnsName）"
+       },
+       {
+        "c": "Resolve-DnsName corp.example -Type MX",
+        "n": "看这个域的 MX 指向谁",
+        "s": "补充（vault 未收录 Resolve-DnsName）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "nslookup -type=txt corp.example",
+        "n": "SPF 就是一串 v=spf1 开头的 TXT",
+        "s": "《系统》Windows CMD.md · nslookup"
+       },
+       {
+        "c": "nslookup -type=mx corp.example",
+        "n": "MX 记录决定信投给哪台服务器",
+        "s": "《系统》Windows CMD.md · nslookup"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "发件客户端",
+       "to": "发件服务器",
+       "pkt": 0,
+       "bubble": "EHLO",
+       "hl": [
+        "220",
+        "EHLO"
+       ],
+       "vals": {
+        "220": "mail.bank.example ESMTP Postfix",
+        "EHLO": "client.example"
+       },
+       "say": "服务器先报 220，客户端 EHLO 自报域名，换回一张能力列表。",
+       "sub": "这行 banner 免费泄露了软件与版本。"
+      },
+      {
+       "who": "发件客户端",
+       "to": "发件服务器",
+       "pkt": 0,
+       "bubble": "信封两地址",
+       "hl": [
+        "MAIL FROM",
+        "RCPT TO"
+       ],
+       "vals": {
+        "MAIL FROM": "<alice@bank.example>",
+        "RCPT TO": "<bob@corp.example>"
+       },
+       "say": "信封两个地址：退信寄给谁、实际投给谁，收件人都看不到。",
+       "sub": "服务器只校验域名语法，不验证归属。"
+      },
+      {
+       "who": "发件客户端",
+       "to": "发件服务器",
+       "pkt": 0,
+       "bubble": "DATA",
+       "hl": [
+        "DATA",
+        "354"
+       ],
+       "vals": {
+        "DATA": "DATA",
+        "354": "End data with <CR><LF>.<CR><LF>"
+       },
+       "say": "DATA 进入数据模式，只靠单独一行的句点结束正文。",
+       "sub": "没有长度前缀，边界是一个字符。"
+      },
+      {
+       "who": "收件 MTA",
+       "to": "收件人",
+       "pkt": 1,
+       "bubble": "首部 + 正文",
+       "hl": [
+        "Return-Path",
+        "Received",
+        "From",
+        "Subject"
+       ],
+       "vals": {
+        "Return-Path": "<alice@bank.example>",
+        "From": "\"Alice\" <alice@bank.example>",
+        "Subject": "Quarterly report"
+       },
+       "say": "投递时 MTA 补 Return-Path 与 Received，首部与正文用空行分开。",
+       "sub": "只有别人替你写的那几行值得信。"
+      },
+      {
+       "who": "收件人",
+       "to": "邮件服务器",
+       "pkt": 2,
+       "bubble": "POP3 取信",
+       "hl": [
+        "USER",
+        "PASS",
+        "RETR 1"
+       ],
+       "vals": {
+        "USER": "bob",
+        "PASS": "s3cr3t",
+        "RETR 1": "第 1 封"
+       },
+       "say": "POP3 用明文 USER/PASS 登录，RETR 取走整封信。",
+       "sub": "同网段嗅探就能拿到账号口令。"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "伪造发件人骗过收件人；借你的服务器骗过整个世界",
+   "lead": "两个场景都不需要破解任何东西：一个伪造的是字符串，一个滥用的是配置。",
+   "scenes": [
+    {
+     "name": "伪造发件人（SPF/DKIM 失效）",
+     "cmds": {
+      "linux": [
+       {
+        "c": "swaks --to finance@corp.example --from ceo@corp.example --server mx.corp.example --header 'Subject: 紧急付款' --body '请立即转账'",
+        "n": "十分钟内复现一封完整伪造信，看目标 MX 给什么应答",
+        "s": "补充（vault 无 swaks，伪造复现最快）"
+       },
+       {
+        "c": "dig +short TXT corp.example",
+        "n": "发信前先看受害域有没有 SPF，没有就不必绕",
+        "s": "补充（vault 无 dig，查 TXT 策略）"
+       },
+       {
+        "c": "openssl s_client -connect mx.corp.example:25 -quiet",
+        "n": "手工敲 EHLO/MAIL FROM，观察 250 与 550 的区别",
+        "s": "补充（vault 无 openssl，手敲 SMTP）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Resolve-DnsName corp.example -Type TXT",
+        "n": "确认 SPF 内容与是不是以 -all 结尾",
+        "s": "补充（vault 未收录 Resolve-DnsName）"
+       },
+       {
+        "c": "Test-NetConnection mx.corp.example -Port 25",
+        "n": "目标 MX 的 25 端口是否对公网开放",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "nslookup -type=txt corp.example",
+        "n": "有没有 v=spf1，一眼看出能不能直接伪造",
+        "s": "《系统》Windows CMD.md · nslookup"
+       },
+       {
+        "c": "nslookup -type=txt _dmarc.corp.example",
+        "n": "有没有 DMARC 策略，p=none 等于不拦",
+        "s": "《系统》Windows CMD.md · nslookup"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "目标 MX",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "直连 25",
+       "hl": [
+        "EHLO",
+        "250-"
+       ],
+       "vals": {
+        "EHLO": "evil.example",
+        "250-": "250-mail.corp.example"
+       },
+       "say": "绕过自己的 ISP，直接对目标 MX 开口，不受发送方策略约束。",
+       "sub": "25 端口对全网开放，就是伪造的入口。"
+      },
+      {
+       "who": "攻击者",
+       "to": "目标 MX",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "假信封",
+       "hl": [
+        "MAIL FROM",
+        "250 2.1.0"
+       ],
+       "vals": {
+        "MAIL FROM": "<ceo@corp.example>",
+        "250 2.1.0": "250 2.1.0 Ok（只校验语法）"
+       },
+       "say": "信封发件人填成受害组织域名，服务器照样回 250。",
+       "sub": "没有任何一步要求证明“你有权代表它”。"
+      },
+      {
+       "who": "目标 MX",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "收件人通过",
+       "hl": [
+        "RCPT TO",
+        "250 2.1.5"
+       ],
+       "vals": {
+        "RCPT TO": "<finance@corp.example>",
+        "250 2.1.5": "250 2.1.5 Ok"
+       },
+       "say": "投递链全部接受，即时反馈还顺带确认了这个邮箱真实存在。",
+       "sub": "550 与 551 的差别就是账号枚举接口。"
+      },
+      {
+       "who": "攻击者",
+       "to": "目标 MX",
+       "pkt": 1,
+       "evil": true,
+       "bubble": "伪造首部",
+       "hl": [
+        "From",
+        "Subject",
+        "Return-Path"
+       ],
+       "vals": {
+        "From": "\"CEO Zhang\" <ceo@corp.example>",
+        "Subject": "紧急付款（Urgent payment）",
+        "Return-Path": "<ceo@corp.example>"
+       },
+       "say": "首部 From 与信封一致，显示名比真实地址更可信。",
+       "sub": "客户端多数只显示名，地址看不到。"
+      },
+      {
+       "who": "目标 MX",
+       "to": "财务人员",
+       "pkt": 1,
+       "bubble": "验证没拦住",
+       "hl": [
+        "Received",
+        "From",
+        "Message-ID"
+       ],
+       "vals": {
+        "Received": "from relay.evil.example [45.33.12.9]",
+        "Message-ID": "<2026…@paypal-secure.example>"
+       },
+       "say": "SPF 拿信封域比连接 IP，本该 fail；域若未发策略，信照样进箱。",
+       "sub": "DKIM 无签名，DMARC 无从对齐。"
+      }
+     ]
+    },
+    {
+     "name": "开放中继滥用",
+     "cmds": {
+      "linux": [
+       {
+        "c": "swaks --to victim@other.example --from ceo@corp.example --server mail.corp.example",
+        "n": "一条命令测开放中继：被接受即中继开着",
+        "s": "补充（vault 无 swaks，中继探测最快）"
+       },
+       {
+        "c": "swaks --to x@other.example --server mail.corp.example --quit-after RCPT",
+        "n": "只用 RCPT 试探不真发信，成本最低",
+        "s": "补充（vault 无 swaks，探测而不发信）"
+       },
+       {
+        "c": "sudo tcpdump -ni any -A 'tcp port 25' | grep -E 'MAIL FROM|RCPT TO'",
+        "n": "抓一次中继会话，看清“非本地到非本地”",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection mail.corp.example -Port 25",
+        "n": "中继入口是否可达",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       },
+       {
+        "c": "Resolve-DnsName corp.example -Type MX",
+        "n": "确认这就是该域的出口 MTA",
+        "s": "补充（vault 未收录 Resolve-DnsName）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "nslookup -type=mx corp.example",
+        "n": "MX 指向哪台机器，就是可疑中继",
+        "s": "《系统》Windows CMD.md · nslookup"
+       },
+       {
+        "c": "telnet mail.corp.example 25",
+        "n": "手敲 MAIL FROM/RCPT TO，看是否回 250",
+        "s": "补充（vault 未收录 telnet，且 Win 默认未安装）"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "企业 MTA",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "EHLO 探能力",
+       "hl": [
+        "EHLO",
+        "250-"
+       ],
+       "vals": {
+        "EHLO": "attacker.example",
+        "250-": "250-mail.corp.example"
+       },
+       "say": "先探能力：支不支持 AUTH、单封上限多少。",
+       "sub": "能力列表就是后续手法的目录。"
+      },
+      {
+       "who": "企业 MTA",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "如实相告",
+       "hl": [
+        "250-SIZE",
+        "250-8BITMIME"
+       ],
+       "vals": {
+        "250-SIZE": "10240000",
+        "250-8BITMIME": "允许 8 位字节"
+       },
+       "say": "服务器老实报出 SIZE 与扩展；没要求 AUTH 就是中继开着的信号。",
+       "sub": "未认证就收 MAIL FROM，等于公共邮局。"
+      },
+      {
+       "who": "攻击者",
+       "to": "企业 MTA",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "非本地到非本地",
+       "hl": [
+        "MAIL FROM",
+        "RCPT TO"
+       ],
+       "vals": {
+        "MAIL FROM": "<ceo@corp.example>",
+        "RCPT TO": "<victim@other.example>（×5000）"
+       },
+       "say": "发件人写成本域、收件人全是外部域，一次塞五千个 RCPT。",
+       "sub": "这就是中继滥用的标准形态。"
+      },
+      {
+       "who": "企业 MTA",
+       "to": "外部 MX",
+       "pkt": 0,
+       "bubble": "逐封中转",
+       "hl": [
+        "RCPT TO",
+        "250 2.1.5"
+       ],
+       "vals": {
+        "RCPT TO": "<victim@other.example>",
+        "250 2.1.5": "250 2.1.5 Ok ×5000"
+       },
+       "say": "五千封信全从企业出口 IP 发出，反垃圾组织立刻拉黑这个 IP。",
+       "sub": "真正被罚的是正常业务邮件。"
+      },
+      {
+       "who": "受害者（收件人）",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "SPF 反而背书",
+       "hl": [
+        "Received",
+        "From",
+        "Return-Path"
+       ],
+       "vals": {
+        "Received": "from mail.corp.example [203.0.113.25]",
+        "From": "\"CEO Zhang\" <ceo@corp.example>"
+       },
+       "say": "信确实从 corp.example 的授权 IP 发出，SPF 校验通过。",
+       "sub": "验证机制替攻击者做了担保。"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "用 DNS 里的策略在投递阶段就判死，用 TLS 在路上封口",
+   "lead": "两条攻击重放：伪造在 SPF/DKIM/DMARC 对齐处被拒收，中继在“非本地到非本地”处被关死。",
+   "scenes": [
+    {
+     "name": "SPF + DKIM + DMARC 拒收",
+     "cmds": {
+      "linux": [
+       {
+        "c": "dig +short TXT corp.example",
+        "n": "应看到 v=spf1 … -all，结尾 -all 才是否决式",
+        "s": "补充（vault 无 dig，查 SPF）"
+       },
+       {
+        "c": "dig +short TXT _dmarc.corp.example",
+        "n": "DMARC 策略，p=reject 才真拦",
+        "s": "补充（vault 无 dig，查 DMARC）"
+       },
+       {
+        "c": "dig +short TXT default._domainkey.corp.example",
+        "n": "DKIM 公钥是否存在，没有就没法验签",
+        "s": "补充（vault 无 dig，查 DKIM 公钥）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Resolve-DnsName _dmarc.corp.example -Type TXT",
+        "n": "Windows 侧读 DMARC 策略",
+        "s": "补充（vault 未收录 Resolve-DnsName）"
+       },
+       {
+        "c": "Test-NetConnection mail.corp.example -Port 25",
+        "n": "验证 MTA-STS 与证书策略生效后端口行为",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "nslookup -type=txt _dmarc.corp.example",
+        "n": "看 p= 后面是 none 还是 reject",
+        "s": "《系统》Windows CMD.md · nslookup"
+       },
+       {
+        "c": "nslookup -type=txt corp.example",
+        "n": "SPF 记录内容与结尾限定符",
+        "s": "《系统》Windows CMD.md · nslookup"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "目标 MX",
+       "to": "伪造信",
+       "pkt": 0,
+       "bubble": "SPF fail",
+       "hl": [
+        "MAIL FROM",
+        "250 2.1.0"
+       ],
+       "vals": {
+        "MAIL FROM": "<ceo@corp.example>",
+        "250 2.1.0": "信封域查 SPF → 45.33.12.9 不在列表 → fail"
+       },
+       "say": "接收方用信封域查 SPF，连接 IP 不在授权列表，判 fail。",
+       "sub": "SPF 只看 IP，不看内容。"
+      },
+      {
+       "who": "目标 MX",
+       "to": "伪造信",
+       "pkt": 1,
+       "bubble": "对齐失败",
+       "hl": [
+        "From",
+        "Return-Path",
+        "Message-ID"
+       ],
+       "vals": {
+        "From": "\"CEO Zhang\" <ceo@corp.example>",
+        "Return-Path": "<ceo@corp.example>",
+        "Message-ID": "域与 From 不一致 → 判为伪造"
+       },
+       "say": "无 DKIM 签名，对齐失败；DMARC 要求 SPF 或 DKIM 至少一项通过且对齐。",
+       "sub": "两样都不成立，按 p=reject 处置。"
+      },
+      {
+       "who": "目标 MX",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "550 拒收",
+       "hl": [
+        "MAIL FROM",
+        "250 2.1.0"
+       ],
+       "vals": {
+        "MAIL FROM": "<ceo@corp.example>",
+        "250 2.1.0": "550 5.7.1 DMARC policy reject"
+       },
+       "say": "信在 DATA 之后被整封拒收，不投递、也不进垃圾箱。",
+       "sub": "发件域先发布 p=reject，这条才生效。"
+      },
+      {
+       "who": "企业 MTA",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "中继关闭",
+       "hl": [
+        "MAIL FROM",
+        "RCPT TO"
+       ],
+       "vals": {
+        "MAIL FROM": "<ceo@corp.example>（非认证）",
+        "RCPT TO": "<victim@other.example> → 550 relay denied"
+       },
+       "say": "只放行已认证用户，或本地域与外部域之间的两类投递。",
+       "sub": "非本地到非本地一律 550。"
+      },
+      {
+       "who": "收件人",
+       "to": "邮件服务器",
+       "pkt": 3,
+       "bubble": "993 加密取信",
+       "hl": [
+        "* OK",
+        "a1 LOGIN",
+        "a1 OK"
+       ],
+       "vals": {
+        "* OK": "[CAPABILITY IMAP4rev1 STARTTLS]",
+        "a1 LOGIN": "在 TLS 通道内提交",
+        "a1 OK": "LOGIN completed"
+       },
+       "say": "取信走 993 隐式 TLS 或 STARTTLS 升级，口令不再明文。",
+       "sub": "STARTTLS 前几步仍明文，须强制加密。"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

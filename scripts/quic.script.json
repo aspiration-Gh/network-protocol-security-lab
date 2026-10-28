@@ -1,0 +1,591 @@
+{
+ "id": "quic",
+ "notes": {
+  "Header Form + Fixed Bit + Type + Reserved + PN Len": {
+   "short": "一个字节定形态，低 4 位还被盖住",
+   "more": "0xc3 即长首部、固定位 1、类型 00（Initial）、保留位 00、包号长 4 字节。低 4 位受首部保护，线上看到的是掩码异或后的值；去保护后保留位必须为 0。",
+   "sec": "固定位置 0 的包必须丢弃，这是与其他 UDP 协议共存的关键；保留位非零即视为攻击迹象，但必须先剥完两层保护再判断。"
+  },
+  "Destination Connection ID": {
+   "short": "连接的唯一身份，也是劫持入口",
+   "more": "首个 Initial 里是 8 字节随机值，只用作派生 Initial 密钥的盐；之后由服务器指定，客户端此后每个包都带着它。短首部不带长度字段，长度由接收方上下文决定。",
+   "sec": "包只认 CID 不认地址，所以源地址变了连接也断不了——这既是连接迁移的机制，也是迁移劫持的入口；CID 必须不可预测且定期轮换。"
+  },
+  "Token Length": {
+   "short": "地址验证令牌，Retry 后才非零",
+   "more": "varint。客户端首个 Initial 为 0；收到 Retry 后重发的 Initial 会带服务器给的令牌。服务器发出的 Initial 必须为 0，客户端收到非零值应丢弃。",
+   "sec": "令牌让服务器只对「能收回令牌」的地址投资源，从源头压掉伪造源的放大；令牌需绑定客户端地址并设寿命，否则可被窃取复用。"
+  },
+  "Frames": {
+   "short": "载荷里的帧序列，多流就在这里交错",
+   "more": "载荷是帧序列，本例两个 STREAM 帧：0x0a 表示有 LEN、无 OFF、无 FIN，随后是流 ID、长度与数据。不同流的数据可在同一包里交错发送，各自独立重传。",
+   "sec": "帧被 AEAD 完整保护，改一个 bit 整包丢弃；但流 ID 解密后明文可辨业务，攻击者也能开大量流做资源耗尽，所以流数上限是必需防御。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "UDP 之上的可靠传输加内置 TLS 1.3：一个包既建连也握手",
+   "lead": "注意两件事：第一个包里就装着 TLS 的 ClientHello；之后所有路由都靠连接 ID，而不是地址。",
+   "scenes": [
+    {
+     "name": "Initial 建连，短首部传数据，地址变了也能继续",
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "Initial",
+       "hl": [
+        "Version",
+        "Destination Connection ID",
+        "Payload / CRYPTO Frame"
+       ],
+       "vals": {
+        "Version": "0x00000001（QUIC v1）",
+        "Destination Connection ID": "8 字节随机，当作 Initial 密钥的盐",
+        "Payload / CRYPTO Frame": "CRYPTO 帧里就是 TLS ClientHello"
+       },
+       "say": "第一个 UDP 包里直接装 TLS ClientHello：传输握手与加密握手合成一次。",
+       "sub": "Initial 密钥由公开的 DCID 派生，所以这一段旁观者其实读得懂。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "Initial + Handshake",
+       "hl": [
+        "Source Connection ID",
+        "Token Length",
+        "Length"
+       ],
+       "vals": {
+        "Source Connection ID": "服务器指定的 CID",
+        "Token Length": "0x00（地址还没验证）",
+        "Length": "0x403a = 58（服务器首包通常更大）"
+       },
+       "say": "服务器指定 CID 并回自己的 Initial；地址未验证前，发送量不得超过收到的 3 倍。",
+       "sub": "3× 是单点放大的天花板，也是它比 DNS、Memcached 难被滥用的原因。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "1-RTT",
+       "hl": [
+        "Destination Connection ID",
+        "Packet Number",
+        "Frames"
+       ],
+       "vals": {
+        "Destination Connection ID": "8 字节，此后路由全靠它",
+        "Packet Number": "0x012c（单调递增、不复用）",
+        "Frames": "STREAM(id=0) 与 STREAM(id=4)"
+       },
+       "say": "握手完成后切成短首部：没有版本、没有包类型，只剩 CID 与包号。",
+       "sub": "包号显式递增且不复用，是丢包检测与 ACK 的依据，比字节序号简单。"
+      },
+      {
+       "who": "客户端",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "首部保护",
+       "hl": [
+        "Header Form + Fixed Bit + Type + Reserved + PN Len",
+        "Packet Number"
+       ],
+       "vals": {
+        "Header Form + Fixed Bit + Type + Reserved + PN Len": "低位被掩码异或",
+        "Packet Number": "被掩码，旁观者读不到"
+       },
+       "say": "首部保护把首字节低位与包号一起异或掉：连序号都不给中间设备看。",
+       "sub": "目的不是保密而是抗僵化——中间盒无法形成基于包号的固化规则。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "连接迁移",
+       "hl": [
+        "Destination Connection ID",
+        "Frames"
+       ],
+       "vals": {
+        "Destination Connection ID": "还是这 8 字节",
+        "Frames": "PATH_CHALLENGE / PATH_RESPONSE 验新路径"
+       },
+       "say": "从 Wi-Fi 切到蜂窝：源地址变了，只要 CID 不变，连接照旧继续。",
+       "sub": "身份从四元组解耦到 CID，这是连接迁移成立的根本原因。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "多路复用",
+       "hl": [
+        "Frames"
+       ],
+       "vals": {
+        "Frames": "STREAM(0) 与 STREAM(4) 交错发送"
+       },
+       "say": "一条连接跑多条流：某条流丢包只阻塞它自己，没有跨流队头阻塞。",
+       "sub": "代价是拥塞控制、pacing、丢包检测全搬到用户态自己实现。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "curl --http3 -sv https://cloudflare-quic.com -o /dev/null",
+        "n": "--http3 走 QUIC；需 curl ≥7.66 且编译了 ngtcp2 或 quiche 后端",
+        "s": "补充（curl 的 HTTP/3 需单独编译，vault 未收录）"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'udp port 443'",
+        "n": "QUIC 全在 UDP 443；长首部首字节高位为 1，短首部为 0",
+        "s": "补充（抓包必备）"
+       },
+       {
+        "c": "ss -uanp | grep ':443'",
+        "n": "本机 UDP 443 端点与进程，确认走的是 UDP 而不是 TCP",
+        "s": "《系统》Linux.md · ss"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection cloudflare-quic.com -Port 443 -InformationLevel Detailed",
+        "n": "注意这是 TCP 探测：通了也不代表 UDP 443 能过",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       },
+       {
+        "c": "Get-NetUDPEndpoint -LocalPort 443",
+        "n": "本机 443 上的 UDP 端点，QUIC 客户端会占一个短暂端口",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "curl --http3 -v https://cloudflare-quic.com -o NUL",
+        "n": "同 Linux 侧；不支持时会直接报 --http3 未知选项",
+        "s": "补充（Windows 内置 curl 通常不含 HTTP/3 后端）"
+       },
+       {
+        "c": "netstat -ano -p UDP | findstr :443",
+        "n": "看 443 上有没有 UDP 流量，区分 QUIC 与普通 HTTPS",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "0-RTT 可以被重放；连接 ID 既认连接，也认拿着它的人",
+   "lead": "这一章的两个攻击都不需要密钥：一个照抄字节，一个照抄 CID。",
+   "scenes": [
+    {
+     "name": "0-RTT 重放：同一段字节，执行两次",
+     "steps": [
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "NewSessionTicket",
+       "hl": [
+        "Payload / CRYPTO Frame"
+       ],
+       "vals": {
+        "Payload / CRYPTO Frame": "CRYPTO 帧里带 NewSessionTicket"
+       },
+       "say": "首次连接完成后，服务器在 CRYPTO 帧里下发票据与 max_early_data_size。",
+       "sub": "票据与 early secret 被缓存，early key 由 PSK 派生。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "0-RTT 包",
+       "hl": [
+        "Header Form + Fixed Bit + Type + Reserved + PN Len",
+        "Packet Number"
+       ],
+       "vals": {
+        "Header Form + Fixed Bit + Type + Reserved + PN Len": "长首部，类型 01 = 0-RTT",
+        "Packet Number": "0x00000001"
+       },
+       "say": "下一条连接：Initial 里带 early_data，紧接着就发 0-RTT 包。",
+       "sub": "0-RTT 用 early key 加密，旁观者解不开，但整包可以照抄。"
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "存包",
+       "evil": true,
+       "hl": [
+        "Destination Connection ID",
+        "Length"
+       ],
+       "vals": {
+        "Destination Connection ID": "必须留着，否则服务器找不到连接",
+        "Length": "原样不动"
+       },
+       "say": "抓包只要两样：DCID 与整包字节，重放时一个都不能改。",
+       "sub": "UDP 无状态，抓包与重放的成本都低到可以脚本化。"
+      },
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "原样重放",
+       "evil": true,
+       "hl": [
+        "Packet Number",
+        "Length"
+       ],
+       "vals": {
+        "Packet Number": "包号复用",
+        "Length": "字节不变"
+       },
+       "say": "服务器用同一 PSK 派生同一 early key，AEAD 校验必然通过。",
+       "sub": "0-RTT 包是长首部，包号明文可见，但协议层没有全局重放窗口。"
+      },
+      {
+       "who": "服务器",
+       "to": "应用",
+       "pkt": 1,
+       "bubble": "提前交付",
+       "hl": [
+        "Frames"
+       ],
+       "vals": {
+        "Frames": "STREAM(id=0) 载荷是 POST 表单"
+       },
+       "say": "STREAM 帧在握手完成前就交给应用：请求被第二次执行。",
+       "sub": "此时服务器还没验证身份，也分不清这是新请求还是重放。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any -w quic.pcap 'udp port 443'",
+        "n": "存下整条会话；长首部包一眼可辨（首字节高位为 1）",
+        "s": "补充（抓包必备）"
+       },
+       {
+        "c": "sudo tcpreplay -i eth0 quic.pcap",
+        "n": "按原字节重放 0-RTT 包，观察服务端是否重复执行",
+        "s": "补充（tcpreplay 不在 vault）"
+       },
+       {
+        "c": "curl --http3 -v https://cloudflare-quic.com -o /dev/null",
+        "n": "curl 默认不发 0-RTT：要观察重放得自己构造包或改客户端",
+        "s": "补充（curl 的 HTTP/3 需单独编译）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetUDPEndpoint | Measure-Object | Select-Object Count",
+        "n": "UDP 端点数量的异常波动可作为重放或扫描的侧影",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       },
+       {
+        "c": "Test-NetConnection cloudflare-quic.com -Port 443 -InformationLevel Detailed",
+        "n": "先确认基础通路，UDP 是否放行要另行验证",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "curl --http3 -v https://cloudflare-quic.com -o NUL",
+        "n": "确认客户端侧 QUIC 可用，再谈重放实验",
+        "s": "补充（Windows 内置 curl 通常无 HTTP/3）"
+       },
+       {
+        "c": "netstat -ano -p UDP | findstr :443",
+        "n": "同一 PID 反复出现新的 UDP 443 记录，值得核对",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    },
+    {
+     "name": "连接迁移劫持：拿到 CID 就当自己是客户端",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "嗅探",
+       "evil": true,
+       "hl": [
+        "Destination Connection ID",
+        "Packet Number"
+       ],
+       "vals": {
+        "Destination Connection ID": "8 字节，短首部里是明文",
+        "Packet Number": "被首部保护掩码"
+       },
+       "say": "短首部里只有 CID 与（被掩码的）包号：拿到 CID 就拿到连接身份。",
+       "sub": "地址不再是身份的一部分，这既是迁移的前提，也是劫持的入口。"
+      },
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "同 CID 的包",
+       "evil": true,
+       "hl": [
+        "Destination Connection ID"
+       ],
+       "vals": {
+        "Destination Connection ID": "照抄"
+       },
+       "say": "攻击者从自己的地址发出携带同一 CID 的包，假装客户端换了地址。",
+       "sub": "服务端按 CID 找到连接，发现源地址变了，就按迁移逻辑处理。"
+      },
+      {
+       "who": "服务器",
+       "to": "攻击者地址",
+       "pkt": 1,
+       "bubble": "PATH_CHALLENGE",
+       "hl": [
+        "Frames"
+       ],
+       "vals": {
+        "Frames": "PATH_CHALLENGE（8 字节随机）"
+       },
+       "say": "服务端先在新路径上发挑战：有这一步，劫持才有门槛。",
+       "sub": "若实现跳过验证直接迁移，后面两步全省了，攻击立即成功。"
+      },
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "PATH_RESPONSE",
+       "evil": true,
+       "hl": [
+        "Frames"
+       ],
+       "vals": {
+        "Frames": "PATH_RESPONSE 回显那 8 字节"
+       },
+       "say": "挑战收得到就答得上：路径验证证明「可达」，不证明「同一人」。",
+       "sub": "能收到挑战说明路径是通的，这正是路径验证的天花板。"
+      },
+      {
+       "who": "服务器",
+       "to": "攻击者",
+       "pkt": 1,
+       "bubble": "切路径",
+       "hl": [
+        "Destination Connection ID",
+        "Frames"
+       ],
+       "vals": {
+        "Destination Connection ID": "不变",
+        "Frames": "下行 STREAM 全发往新地址"
+       },
+       "say": "发送路径切到攻击者地址，真客户端只看到自己的连接慢慢超时。",
+       "sub": "攻击者站在路径中间：可以转发、可以挑着丢，也可以直接黑洞。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any 'udp port 443 and udp[1:4] = 0x00000001'",
+        "n": "只抓 QUIC v1 长首部包（版本在偏移 1），看清握手起点",
+        "s": "补充（抓包必备）"
+       },
+       {
+        "c": "sudo tcpdump -ni any -A 'udp port 443' | grep -a 'CHALLENGE'",
+        "n": "粗看是否出现路径验证帧；没有就说明服务端可能根本没验证",
+        "s": "补充（抓包必备）"
+       },
+       {
+        "c": "ss -uanp | grep ':443'",
+        "n": "本机 QUIC 连接对应的进程，判断是不是自己的客户端在迁移",
+        "s": "《系统》Linux.md · ss"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv4 | Select-Object IPAddress,InterfaceAlias",
+        "n": "切换网卡时核对出口 IP，是迁移实验的起点",
+        "s": "《系统》PowerShell.md · Get-NetIPAddress"
+       },
+       {
+        "c": "Get-NetUDPEndpoint -LocalPort 443",
+        "n": "本机作为服务端时的 QUIC 监听端点",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "ipconfig",
+        "n": "看地址与默认网关，确认是否真的换了出口",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       },
+       {
+        "c": "netstat -ano -p UDP | findstr :443",
+        "n": "迁移前后应仍是同一条 UDP 会话（本机端口不变）",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "同一场重放与同一场迁移各重来一遍：一个卡在业务白名单，一个卡在路径验证",
+   "lead": "0-RTT 的抗重放只能建在业务层；迁移劫持的防护则全看路径验证做没做。",
+   "scenes": [
+    {
+     "name": "幂等白名单 + 票据去重，迁移必须过挑战",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "重放 0-RTT",
+       "evil": true,
+       "hl": [
+        "Payload / CRYPTO Frame"
+       ],
+       "vals": {
+        "Payload / CRYPTO Frame": "同一段 CRYPTO 与 STREAM 字节"
+       },
+       "say": "重放照旧：同一张票据、同一段 0-RTT 字节，一个不改。",
+       "sub": "防护要让这次重放找不到可执行的东西，而不是让它发不出来。"
+      },
+      {
+       "who": "服务器",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "只收幂等",
+       "hl": [
+        "Payload / CRYPTO Frame",
+        "Token Length"
+       ],
+       "vals": {
+        "Payload / CRYPTO Frame": "POST 不在白名单 → 不收 0-RTT",
+        "Token Length": "要求先完成 1-RTT"
+       },
+       "say": "只对幂等请求开 early data：写操作一律退回 1-RTT 再执行。",
+       "sub": "省下的那个 RTT，不值得用「重复扣款」去换。"
+      },
+      {
+       "who": "服务器",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "票据单次",
+       "hl": [
+        "Payload / CRYPTO Frame"
+       ],
+       "vals": {
+        "Payload / CRYPTO Frame": "票据单次使用，请求指纹跨节点去重"
+       },
+       "say": "票据用一次即作废，再用请求指纹在共享存储里去重。",
+       "sub": "多节点必须共享去重状态，否则每个节点各执行一次。"
+      },
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "伪迁移",
+       "evil": true,
+       "hl": [
+        "Destination Connection ID"
+       ],
+       "vals": {
+        "Destination Connection ID": "照抄受害者连接的 CID"
+       },
+       "say": "接着试迁移：从自己的地址发携带受害者 CID 的短首部包。",
+       "sub": "这次服务端先看传输参数，再决定理不理它。"
+      },
+      {
+       "who": "服务器",
+       "to": "攻击者地址",
+       "pkt": 1,
+       "bubble": "先验证",
+       "hl": [
+        "Frames"
+       ],
+       "vals": {
+        "Frames": "PATH_CHALLENGE，验证前不切路径"
+       },
+       "say": "迁移必须先过 PATH_CHALLENGE；disable_active_migration 可禁被动迁移。",
+       "sub": "验证只证明可达性，不证明身份，所以还要配合 CID 轮换。"
+      },
+      {
+       "who": "服务器",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "3× + 轮换",
+       "hl": [
+        "Length",
+        "Source Connection ID"
+       ],
+       "vals": {
+        "Length": "地址验证前 ≤ 收包量 3 倍",
+        "Source Connection ID": "定期轮换，抗跨连接关联"
+       },
+       "say": "地址验证前发送量卡在 3 倍，CID 定期轮换让旁观者串不起多条连接。",
+       "sub": "3× 只压低单点放大，分布式聚合还要靠 BCP38 从源头断。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any 'udp port 443' -c 50",
+        "n": "取 50 个包快速看：0-RTT 与重放包在长首部里形态完全一致",
+        "s": "补充（抓包必备）"
+       },
+       {
+        "c": "sudo iptables -A INPUT -p udp --dport 443 -m limit --limit 200/sec -j ACCEPT",
+        "n": "按速率兜底限流；QUIC 合法突发大，阈值必须实测后再定",
+        "s": "补充（iptables 不在 vault）"
+       },
+       {
+        "c": "curl --http3 -sv https://cloudflare-quic.com -o /dev/null",
+        "n": "防护后复测：正常 HTTP/3 访问必须仍然可用",
+        "s": "补充（curl 的 HTTP/3 需单独编译）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "New-NetFirewallRule -DisplayName 'QUIC-UDP-443' -Direction Inbound -Protocol UDP -LocalPort 443 -Action Allow",
+        "n": "只放行必要的 UDP 443，其余 UDP 入向一律拒",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       },
+       {
+        "c": "Get-NetUDPEndpoint -LocalPort 443",
+        "n": "复核监听仍在、且只有一个服务占用",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall firewall add rule name=\"QUIC-UDP-443\" dir=in action=allow protocol=UDP localport=443",
+        "n": "与图形界面等价的放行规则",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "netstat -ano -p UDP | findstr :443",
+        "n": "复查 UDP 443 的连接数是否回到正常水平",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

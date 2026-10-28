@@ -1,0 +1,580 @@
+{
+ "id": "pppoe",
+ "notes": {
+  "Session ID": {
+   "short": "16 位会话号，明文可见",
+   "more": "发现阶段固定 0x0000，PADS 里由服务器分配，之后整个会话不变。会话由「源 MAC + 目的 MAC + Session ID」三要素唯一确定，三者全明文。",
+   "sec": "抓到一次就能复制三要素，注入与伪造 PADT 都不需要凭证。"
+  },
+  "TAG AC-Cookie": {
+   "short": "服务器发的不透明令牌",
+   "more": "PADO 里下发，客户端必须在 PADR 中原样带回。它让服务器先确认「这个客户端能单播收到我的应答」，提高伪造源 MAC 的抢答成本。",
+   "sec": "只提高成本不消除攻击：真 Cookie 可以被转发，抢答者仍能骗过客户端。"
+  },
+  "TAG Host-Uniq": {
+   "short": "客户端配对用的随机值",
+   "more": "客户端自选，服务器必须在 PADO 里原样回填。它解决的是「哪个应答对应我这次的 PADI」，不承担任何身份鉴别作用。",
+   "sec": "配对成功不等于对端可信，客户端没有验证 PADO 来源的手段。"
+  },
+  "PPP Protocol": {
+   "short": "PPP 内层协议，决定载荷",
+   "more": "0x0021 是 IPv4，0xC021 LCP、0xC023 PAP、0xC223 CHAP、0x8021 IPCP。会话阶段 0x8864 之后就是它，决定后面载荷的类型。",
+   "sec": "认证与数据同走这一层且都明文，抓到会话就等于拿到 PPP 全部内容。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "发现阶段广播换一个 Session ID，会话阶段全部单播：两个 EtherType 分工",
+   "lead": "0x8863 找服务器，0x8864 传数据。会话一旦建立，两端 MAC 与会话号就固定下来。",
+   "scenes": [
+    {
+     "name": "发现 → 会话",
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "广播",
+       "pkt": 0,
+       "bubble": "PADI",
+       "hl": [
+        "Destination Address",
+        "EtherType",
+        "Code",
+        "Session ID",
+        "TAG 2 Value"
+       ],
+       "vals": {
+        "Destination Address": "FF:FF:FF:FF:FF:FF（还不知道 BRAS 在哪）",
+        "EtherType": "0x8863 = 发现阶段",
+        "Code": "0x09 = PADI",
+        "Session ID": "0x0000（尚未分配）",
+        "TAG 2 Value": "0xdeadbeef（Host-Uniq，配对用）"
+       },
+       "say": "客户端广播 PADI：谁提供 PPPoE 服务？此时会话号还是 0。",
+       "sub": "发现阶段没有任何认证，谁先答都可能被选中。"
+      },
+      {
+       "who": "服务器 BRAS",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "PADO",
+       "hl": [
+        "Code",
+        "Session ID",
+        "TAG AC-Name",
+        "TAG AC-Cookie",
+        "TAG Host-Uniq"
+       ],
+       "vals": {
+        "Code": "0x07 = PADO",
+        "Session ID": "0x0000（此时仍未分配）",
+        "TAG AC-Name": "BRAS-01（自报的名字）",
+        "TAG AC-Cookie": "1122334455667788（不透明令牌）",
+        "TAG Host-Uniq": "deadbeef（必须原样回填）"
+       },
+       "say": "BRAS 单播回应：报出 AC-Name，给一个 AC-Cookie，回填 Host-Uniq。",
+       "sub": "客户端靠 Host-Uniq 把应答与自己的请求配对。"
+      },
+      {
+       "who": "客户端",
+       "to": "BRAS",
+       "pkt": 1,
+       "bubble": "PADR → PADS",
+       "hl": [
+        "Code",
+        "Session ID",
+        "TAG AC-Cookie"
+       ],
+       "vals": {
+        "Code": "0x19 = PADR，0x65 = PADS",
+        "Session ID": "0x1234（PADS 中分配）",
+        "TAG AC-Cookie": "必须原样带回"
+       },
+       "say": "客户端选定这台 BRAS，PADS 里拿到会话号 0x1234。",
+       "sub": "会话号 16 位，全程不变，也不加密。"
+      },
+      {
+       "who": "客户端",
+       "to": "BRAS",
+       "pkt": 2,
+       "bubble": "会话数据",
+       "hl": [
+        "EtherType",
+        "Code",
+        "Session ID",
+        "PPP Protocol"
+       ],
+       "vals": {
+        "EtherType": "0x8864 = 会话阶段（全部单播）",
+        "Code": "0x00（会话阶段固定）",
+        "Session ID": "0x1234",
+        "PPP Protocol": "0x0021 = IPv4"
+       },
+       "say": "会话阶段全部单播，以太网类型换成 0x8864，Code 固定 0。",
+       "sub": "PPP 的 LCP/CHAP/IPCP 都在这一阶段跑。"
+      },
+      {
+       "who": "客户端",
+       "to": "BRAS",
+       "pkt": 2,
+       "bubble": "三要素定会话",
+       "hl": [
+        "Source Address",
+        "Destination Address",
+        "Session ID"
+       ],
+       "vals": {
+        "Source Address": "00:0c:29:11:22:33（客户端）",
+        "Destination Address": "00:1a:2b:3c:4d:5e（BRAS）",
+        "Session ID": "0x1234"
+       },
+       "say": "「源 MAC + 目的 MAC + Session ID」三者唯一确定一条会话。",
+       "sub": "三者全是明文，抓到就能复制。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -eni eth0 -c 5 'ether proto 0x8863'",
+        "n": "只看发现阶段：PADI/PADO 的 Code 在以太网偏移 15 字节",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo tcpdump -eni eth0 -c 5 'ether proto 0x8864'",
+        "n": "只看会话阶段：单播、带 Session ID，里面是 PPP",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "ip -s link show",
+        "n": "会话起来后会出现 ppp0，看它的收发计数",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetAdapter | Where-Object InterfaceDescription -like '*PPPoE*' | Format-Table Name,Status,LinkSpeed",
+        "n": "WAN Miniport (PPPoE) 的状态与速率",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetIPAddress | Format-Table InterfaceAlias,IPAddress,PrefixLength",
+        "n": "IPCP 分配到的地址落在 PPP 适配器上",
+        "s": "《系统》PowerShell.md · 获取本机 IP 配置：Get-NetIPAddress"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "ipconfig /all",
+        "n": "PPP 适配器段落：IPCP 拿到的地址、DNS 与拨号服务器",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       },
+       {
+        "c": "rasdial",
+        "n": "本机拨号连接与状态，重拨也在这里",
+        "s": "补充（Windows 自带，vault 未收录）"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "发现阶段没认证：抢答 PADO 劫走会话，伪造 PADT 把人踢下线",
+   "lead": "PPPoE 的两个阶段都靠「明文标识」而不是凭证。所以抢答和伪造都不用破密码。",
+   "scenes": [
+    {
+     "name": "假冒 BRAS 抢答 PADO（会话劫持）",
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "广播",
+       "pkt": 0,
+       "bubble": "PADI",
+       "hl": [
+        "Destination Address",
+        "Code",
+        "Session ID"
+       ],
+       "vals": {
+        "Destination Address": "FF:FF:FF:FF:FF:FF（全网都能听见）",
+        "Code": "0x09 = PADI",
+        "Session ID": "0x0000"
+       },
+       "say": "客户端广播找服务器，广播域里的每台设备都收得到。",
+       "sub": "包括攻击者那块网卡。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "抢先 PADO",
+       "hl": [
+        "Source Address",
+        "Code",
+        "TAG AC-Name",
+        "TAG AC-Cookie"
+       ],
+       "vals": {
+        "Source Address": "00:1a:2b:3c:4d:5e（伪装成 BRAS 的 MAC）",
+        "Code": "0x07 = PADO",
+        "TAG AC-Name": "BRAS-01（名字照抄）",
+        "TAG AC-Cookie": "任意值（客户端无法验证真伪）"
+       },
+       "say": "抢在真 BRAS 之前回 PADO，名字照抄，Cookie 随便填一个。",
+       "sub": "客户端只等第一个应答，先到的就被选中。",
+       "evil": true
+      },
+      {
+       "who": "客户端",
+       "to": "攻击者 A",
+       "pkt": 1,
+       "bubble": "PADR 交给攻击者",
+       "hl": [
+        "Code",
+        "Session ID",
+        "TAG AC-Cookie"
+       ],
+       "vals": {
+        "Code": "0x19 = PADR",
+        "Session ID": "0x1234（由攻击者的 PADS 分配）",
+        "TAG AC-Cookie": "攻击者给的那个值，原样回填"
+       },
+       "say": "客户端把 PADR 发给攻击者，会话被引到劫持者身上。",
+       "sub": "PADS 与 Session ID 现在都由攻击者说了算。"
+      },
+      {
+       "who": "客户端",
+       "to": "攻击者 A",
+       "pkt": 2,
+       "bubble": "认证与数据都经过",
+       "hl": [
+        "Session ID",
+        "PPP Protocol",
+        "PPP Information"
+       ],
+       "vals": {
+        "Session ID": "0x1234",
+        "PPP Protocol": "0xC023 时是 PAP 明文，0x0021 是业务数据",
+        "PPP Information": "明文 IP 包，可读可改"
+       },
+       "say": "会话里的 PPP 认证走攻击者：协商成 PAP 就直接读到口令。",
+       "sub": "就算用 CHAP，后续业务数据仍可嗅探与改写。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "BRAS（真）",
+       "pkt": 2,
+       "bubble": "代理转发",
+       "hl": [
+        "Source Address",
+        "Session ID",
+        "PPP Information"
+       ],
+       "vals": {
+        "Source Address": "换成自己的 MAC",
+        "Session ID": "换成真 BRAS 分配的会话号",
+        "PPP Information": "原样转发，用户照常上网"
+       },
+       "say": "攻击者把流量转给真 BRAS，用户能正常上网，全程无感。",
+       "sub": "最难发现的一类中间人：故障现象为零。",
+       "evil": true
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -eni eth0 'ether proto 0x8863' -c 10",
+        "n": "一次拨号出现两个 PADO（源 MAC 不同）就是有人在抢答",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo tcpdump -eni eth0 'ether proto 0x8864' -c 5",
+        "n": "会话帧的目的 MAC 若不是 BRAS 的真实 MAC，说明被劫持",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "ip neigh show",
+        "n": "同网段出现可疑的 PPPoE 对端 MAC，配合 ARP 表交叉验证",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetAdapter | Format-Table Name,InterfaceDescription,Status",
+        "n": "PPPoE 适配器是否 Up——被劫持后它照样 Up",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetAdapterStatistics | Format-Table Name,BytesSent,BytesReceived",
+        "n": "流量照走，看不出异常，这正说明它是透明代理型劫持",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "rasdial",
+        "n": "断开重拨，观察拨号耗时与对端信息有没有变化",
+        "s": "补充（Windows 自带）"
+       },
+       {
+        "c": "ipconfig /all",
+        "n": "对比拨号前后拿到的网关与 DNS，被劫持时常指向异常地址",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       }
+      ]
+     }
+    },
+    {
+     "name": "伪造 PADT 强制下线",
+     "steps": [
+      {
+       "who": "攻击者 A",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "读三要素",
+       "hl": [
+        "Source Address",
+        "Destination Address",
+        "Session ID"
+       ],
+       "vals": {
+        "Source Address": "客户端 MAC",
+        "Destination Address": "BRAS MAC",
+        "Session ID": "0x1234（明文可得）"
+       },
+       "say": "从任意一个会话帧读出三要素：两端 MAC 与会话号。",
+       "sub": "不需要任何凭证，抓一次就够。",
+       "evil": true
+      },
+      {
+       "who": "攻击者 A",
+       "to": "客户端",
+       "pkt": 2,
+       "bubble": "PADT",
+       "hl": [
+        "Code",
+        "Session ID",
+        "Source Address"
+       ],
+       "vals": {
+        "Code": "0xA7 = PADT（伪造）",
+        "Session ID": "0x1234",
+        "Source Address": "伪造成 BRAS 的 MAC"
+       },
+       "say": "伪造一条 PADT：Code=0xA7，会话号照抄，源 MAC 写成 BRAS。",
+       "sub": "PADT 没有任何认证字段。",
+       "evil": true
+      },
+      {
+       "who": "客户端",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "拆会话",
+       "hl": [
+        "Session ID"
+       ],
+       "vals": {
+        "Session ID": "0x1234 → 立即拆除 PPP 会话与虚拟接口"
+       },
+       "say": "客户端收到 PADT 就拆会话，虚拟接口消失，用户掉线。",
+       "sub": "重新拨号要几秒到几十秒。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "重拨窗口抢答",
+       "hl": [
+        "Code",
+        "TAG Host-Uniq"
+       ],
+       "vals": {
+        "Code": "0x07 = PADO（抢在真 BRAS 前）",
+        "TAG Host-Uniq": "照抄客户端的值"
+       },
+       "say": "在这个重拨窗口抢先回 PADO，把重连直接引到自己身上。",
+       "sub": "断线加抢答，就是一次干净的会话劫持。",
+       "evil": true
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -eni eth0 'ether proto 0x8863 and ether[15] = 0xa7'",
+        "n": "只抓 PADT：不该出现的时刻出现，就是有人在下线你",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo tcpdump -eni eth0 'ether proto 0x8863' -c 20",
+        "n": "完整看一遍流程：PADI→PADO→PADR→PADS→PADT",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "ip -s link show",
+        "n": "ppp0 消失的时间点，就是 PADT 生效的时刻",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetAdapter | Format-Table Name,Status",
+        "n": "PPPoE 适配器从 Up 变 Disconnected 的时刻，就是被下线",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "rasdial",
+        "n": "看连接列表：连接消失说明 PADT 生效",
+        "s": "补充（Windows 自带）"
+       },
+       {
+        "c": "netsh interface ipv4 show interfaces",
+        "n": "虚拟接口是否还在，确认断线发生在哪一层",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "Cookie 抬门槛、限速保资源、CHAP 保口令、PADT 做一致性校验",
+   "lead": "同一场抢答重放一遍：这次客户端带回的 Cookie 对不上，会话不会落到攻击者手上。",
+   "scenes": [
+    {
+     "name": "AC-Cookie + 限速 + CHAP + PADT 校验",
+     "steps": [
+      {
+       "who": "服务器 BRAS",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "AC-Cookie 强校验",
+       "hl": [
+        "Code",
+        "TAG AC-Cookie"
+       ],
+       "vals": {
+        "Code": "0x07 = PADO（Cookie 每次新生成）",
+        "TAG AC-Cookie": "PADR 必须带回同值，否则丢弃"
+       },
+       "say": "AC-Cookie 让客户端先证明单播可达，抢答者拿不到真 Cookie。",
+       "sub": "只提高成本：Cookie 可被转发，攻击没被消除。"
+      },
+      {
+       "who": "客户端",
+       "to": "BRAS",
+       "pkt": 0,
+       "bubble": "限速 PADI",
+       "hl": [
+        "Code",
+        "TAG 2 Value"
+       ],
+       "vals": {
+        "Code": "0x09 = PADI（每端口 ≤ 10 条/秒）",
+        "TAG 2 Value": "Host-Uniq 随机，服务端据此去重"
+       },
+       "say": "接入设备对 PADI/PADR 限速并限制单端口最大会话数。",
+       "sub": "会话上下文不再被一次洪泛吃光。"
+      },
+      {
+       "who": "客户端",
+       "to": "BRAS",
+       "pkt": 2,
+       "bubble": "CHAP 而非 PAP",
+       "hl": [
+        "PPP Protocol"
+       ],
+       "vals": {
+        "PPP Protocol": "0xC223（CHAP：口令不上线）"
+       },
+       "say": "会话内强制 CHAP：口令不上线，抓到会话也没有明文口令。",
+       "sub": "弱口令仍可离线爆破，但至少不是明文。"
+      },
+      {
+       "who": "客户端",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "PADT 校验",
+       "hl": [
+        "Source Address",
+        "Session ID"
+       ],
+       "vals": {
+        "Source Address": "必须与本地记录的 BRAS MAC 一致",
+        "Session ID": "必须与本地会话记录一致"
+       },
+       "say": "PADT 先校验源 MAC 与会话号，不匹配直接丢弃并记日志。",
+       "sub": "源 MAC 可伪造，所以这只是提高门槛。"
+      },
+      {
+       "who": "客户端",
+       "to": "BRAS",
+       "pkt": 2,
+       "bubble": "端口隔离",
+       "hl": [
+        "Destination Address"
+       ],
+       "vals": {
+        "Destination Address": "只能到 BRAS，同端口下用户之间不可达"
+       },
+       "say": "用户端口做隔离（PVLAN/端口保护），别人的 PADI/PADO 你看不到。",
+       "sub": "广播域被切开，抢答就没有舞台。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -eni eth0 'ether proto 0x8863 and ether[15] = 0x07' -c 10",
+        "n": "数 PADO 的条数与来源：正常只有一台 BRAS，两个就要查",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo timeout 5 tcpdump -eni eth0 'ether proto 0x8863 and ether[15] = 0x09' | wc -l",
+        "n": "5 秒内 PADI 条数：单端口几十条以上就是洪泛",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo tcpdump -eni eth0 'ether proto 0x8864' -c 5",
+        "n": "复核会话帧只在与 BRAS MAC 之间单播",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetAdapter | Format-Table Name,Status",
+        "n": "防护后复测：PPPoE 适配器稳定 Up，不再反复掉线",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetAdapterStatistics | Format-Table Name,BytesSent,BytesReceived",
+        "n": "流量恢复正常，没有额外的中转跳数痕迹",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "rasdial",
+        "n": "连续拨号三次，都能稳定连上说明限速没设过严",
+        "s": "补充（Windows 自带）"
+       },
+       {
+        "c": "ipconfig /all",
+        "n": "复核每次拨号拿到的 DNS 与网关一致，没有被改写",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

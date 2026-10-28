@@ -1,0 +1,575 @@
+{
+ "id": "ppp",
+ "notes": {
+  "Option 1 Value": {
+   "short": "认证协议+算法，可被改",
+   "more": "3 字节：前 2 字节 PPP 协议号，后 1 字节算法。0xC223+0x05 是 CHAP/MD5，0xC023+0x05 是 PAP。改这两字节即可降级。",
+   "sec": "认证强度由协商结果决定，所以必须由策略锁死，不能听对方的建议。"
+  },
+  "Value-Size": {
+   "short": "挑战值/摘要的长度",
+   "more": "1 字节，CHAP 只规定长度不规定值。MD5 时填 16；若摘要算法或实现变化，这位决定后面跟几个字节，长度与算法必须匹配。",
+   "sec": "长度字段是解析器的锚点，填错可让对端读越界或错位。"
+  },
+  "Value": {
+   "short": "挑战值或响应摘要",
+   "more": "Challenge 里是随机数，Response 里是 MD5(Identifier ‖ 口令 ‖ 挑战值) 前 16 字节。两者等长，靠 Code 区分语义，线上都明文可见。",
+   "sec": "摘要可离线爆破，挑战值若可预测则退化成 PAP 的处境。"
+  },
+  "Password": {
+   "short": "PAP 明文口令",
+   "more": "长度由 Password-Length 界定，不以下标 0 结尾。字段里就是口令的 ASCII 字节，抓包即得，且整条请求可原样重放。",
+   "sec": "这是 PPP 认证里最贵的一个字段，泄露即账号失守。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "LCP 谈参数、CHAP 验身份、IPCP 发地址：三个协议串在一条链路上",
+   "lead": "PPP 是一条点对点链路上的三段协商。注意顺序：参数先谈，身份再验，地址最后发。",
+   "scenes": [
+    {
+     "name": "建链 → 认证 → 配址",
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "服务器 NAS",
+       "pkt": 0,
+       "bubble": "PPP 帧",
+       "hl": [
+        "Flag",
+        "Address",
+        "Control",
+        "Protocol"
+       ],
+       "vals": {
+        "Flag": "0x7E 帧定界",
+        "Address": "0xFF（点对点，取值固定）",
+        "Control": "0x03 无编号帧",
+        "Protocol": "0xC021 = LCP"
+       },
+       "say": "首尾各一个 0x7E 定界，地址固定 0xFF、控制固定 0x03。",
+       "sub": "没有序号也没有确认，PPP 本身不提供可靠传输。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器 NAS",
+       "pkt": 1,
+       "bubble": "LCP Configure-Request",
+       "hl": [
+        "Code",
+        "Option 1 Type",
+        "Option 1 Value",
+        "Option 2 Type"
+       ],
+       "vals": {
+        "Code": "1 = Configure-Request",
+        "Option 1 Type": "3 = Authentication-Protocol",
+        "Option 1 Value": "0xC223 + 0x05 = CHAP/MD5",
+        "Option 2 Type": "5 = Magic-Number（环路检测）"
+       },
+       "say": "客户端提出：认证方式必须是 CHAP/MD5，并带一个 Magic-Number。",
+       "sub": "认证方式是被协商出来的——这正是被降级的地方。"
+      },
+      {
+       "who": "服务器 NAS",
+       "to": "客户端",
+       "pkt": 2,
+       "bubble": "CHAP Challenge",
+       "hl": [
+        "Code",
+        "Identifier",
+        "Value-Size",
+        "Value",
+        "Name"
+       ],
+       "vals": {
+        "Code": "1 = Challenge",
+        "Identifier": "0x07（本题的交换编号）",
+        "Value-Size": "16（摘要算法决定的长度）",
+        "Value": "每次重新生成的随机数",
+        "Name": "LNS-1（自称的身份）"
+       },
+       "say": "认证方发一个随机挑战值，顺便报上自己的名字。",
+       "sub": "挑战值的新鲜度，是 CHAP 抗重放的全部依据。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器 NAS",
+       "pkt": 3,
+       "bubble": "CHAP Response",
+       "hl": [
+        "Code",
+        "Identifier",
+        "Value",
+        "Name"
+       ],
+       "vals": {
+        "Code": "2 = Response",
+        "Identifier": "0x07（原样回填）",
+        "Value": "MD5(ID ‖ 口令 ‖ 挑战)",
+        "Name": "alice（供对端查库）"
+       },
+       "say": "客户端用口令和挑战值算摘要，只把摘要发回去。",
+       "sub": "线上没有口令，只有 16 字节哈希。"
+      },
+      {
+       "who": "服务器 NAS",
+       "to": "客户端",
+       "pkt": 5,
+       "bubble": "IPCP 要地址",
+       "hl": [
+        "Code",
+        "Option Type（IP-Address）",
+        "IP Address",
+        "Primary DNS Address"
+       ],
+       "vals": {
+        "Code": "1 = Configure-Request",
+        "IP Address": "0.0.0.0（请服务器分配）",
+        "Primary DNS Address": "0.0.0.0（请服务器提供）"
+       },
+       "say": "认证通过才允许 IPCP：请求分配 IP 与 DNS。",
+       "sub": "认证阶段之前收到的 IPCP 会被直接丢弃。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ip -s link",
+        "n": "看 ppp0 的收发计数与 errors，确认链路真的起来了",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "sudo tcpdump -ni any -vv -c 5 'pppoes'",
+        "n": "若跑在 PPPoE 上，-vv 会把 LCP/CHAP 的协议字段解出来",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo grep -iE 'auth|chap|pap' /etc/ppp/options",
+        "n": "本机 pppd 的认证配置，决定协商时会提什么条件",
+        "s": "补充（pppd 配置文件，vault 未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetAdapter | Where-Object InterfaceDescription -like '*PPP*' | Format-Table Name,Status,LinkSpeed",
+        "n": "WAN Miniport (PPP/PPPoE) 的连接状态与速率",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetIPAddress | Format-Table InterfaceAlias,IPAddress,PrefixLength",
+        "n": "IPCP 分配到的地址落在那块适配器上",
+        "s": "《系统》PowerShell.md · 获取本机 IP 配置：Get-NetIPAddress"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "rasdial",
+        "n": "列出本机拨号连接与状态，PPP 链路是否已连接一目了然",
+        "s": "补充（Windows 自带，vault 未收录）"
+       },
+       {
+        "c": "ipconfig /all",
+        "n": "PPP 适配器段落显示 IPCP 分配到的地址与 DNS",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "重放打不穿 CHAP，但离线爆破能；真正省事的办法是把认证降级成 PAP",
+   "lead": "两个攻击各打一半：一个打摘要（口令强度），一个打协商（认证方式）。",
+   "scenes": [
+    {
+     "name": "CHAP 响应：重放无效，离线爆破有效",
+     "steps": [
+      {
+       "who": "攻击者 A",
+       "to": "链路",
+       "pkt": 2,
+       "bubble": "抓 Challenge",
+       "hl": [
+        "Value",
+        "Name"
+       ],
+       "vals": {
+        "Value": "挑战值 16 字节（明文传输）",
+        "Name": "LNS-1（还告诉你是谁在挑战）"
+       },
+       "say": "挑战值本身不保密，抓包就能拿到。",
+       "sub": "拿到它才能算摘要，但还缺口令。",
+       "evil": true
+      },
+      {
+       "who": "攻击者 A",
+       "to": "服务器 NAS",
+       "pkt": 3,
+       "bubble": "重放旧 Response",
+       "hl": [
+        "Identifier",
+        "Value"
+       ],
+       "vals": {
+        "Identifier": "0x07（与请求对得上）",
+        "Value": "上一次抓到的旧摘要"
+       },
+       "say": "把上一次的 Response 原样重发：ID 对得上，但挑战值已经换了。",
+       "sub": "服务器算的是新挑战的摘要，旧值必然不匹配。",
+       "evil": true
+      },
+      {
+       "who": "服务器 NAS",
+       "to": "攻击者 A",
+       "pkt": 3,
+       "bubble": "Failure",
+       "hl": [
+        "Code"
+       ],
+       "vals": {
+        "Code": "4 = Failure（认证失败）"
+       },
+       "say": "重放一次就废：每次挑战都换随机数，旧响应没有第二次价值。",
+       "sub": "所以打 CHAP 靠的不是重放，是离线爆破。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "本地算力",
+       "pkt": 3,
+       "bubble": "离线算字典",
+       "hl": [
+        "Identifier",
+        "Value"
+       ],
+       "vals": {
+        "Identifier": "0x07（参与摘要计算）",
+        "Value": "MD5(0x07 ‖ 候选口令 ‖ 挑战值)，逐个比对"
+       },
+       "say": "抓到的是一对（挑战值，摘要），本地拿字典一个个算摘要比对。",
+       "sub": "全程不碰服务器，日志里什么都不会留。",
+       "evil": true
+      },
+      {
+       "who": "攻击者 A",
+       "to": "—",
+       "pkt": 3,
+       "bubble": "命中弱口令",
+       "hl": [
+        "Name",
+        "Value"
+       ],
+       "vals": {
+        "Name": "alice（用户名也是明文）",
+        "Value": "候选口令命中 → 口令被还原"
+       },
+       "say": "弱口令几秒就命中：MD5 快，字典够大就够用。",
+       "sub": "口令一到手，攻击者认证起来与本人无异。",
+       "evil": true
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any -X -c 20 'pppoes'",
+        "n": "-X 打十六进制：Challenge 与 Response 各 16 字节都在里面",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "printf '\\x07s3cr3t\\xa1\\xb2\\xc3\\xd4\\xe5\\xf6\\x07\\x18\\x29\\x3a\\x4b\\x5c\\x6d\\x7e\\x8f\\x90' | md5sum",
+        "n": "按 RFC 1994 算 MD5(ID ‖ 口令 ‖ 挑战)，一行就是一个候选口令",
+        "s": "补充（CHAP 摘要算法演示）"
+       },
+       {
+        "c": "for p in 123456 password s3cr3t; do printf \"\\x07$p\\xa1\\xb2\\xc3\\xd4\\xe5\\xf6\\x07\\x18\\x29\\x3a\\x4b\\x5c\\x6d\\x7e\\x8f\\x90\" | md5sum; done",
+        "n": "三行输出 = 三个候选口令的摘要，与抓到的响应值逐行比对",
+        "s": "补充（离线字典爆破最小模型）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetAdapter | Where-Object InterfaceDescription -like '*PPP*' | Format-Table Name,Status",
+        "n": "确认这条链路爆破期间一直在线，否则抓不到有效样本",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetIPAddress | Format-Table InterfaceAlias,IPAddress",
+        "n": "记录链路地址，便于把抓包与接口对应起来",
+        "s": "《系统》PowerShell.md · 获取本机 IP 配置：Get-NetIPAddress"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh ras show authmode",
+        "n": "本机 RAS 认证方式（需管理员）：出现 pap 就说明可降到明文",
+        "s": "补充（Windows 自带，vault 未收录）"
+       },
+       {
+        "c": "rasdial",
+        "n": "看连接状态与被拒次数——离线爆破不会留下任何痕迹",
+        "s": "补充（Windows 自带）"
+       }
+      ]
+     }
+    },
+    {
+     "name": "LCP 协商降级：两字节把 CHAP 换成 PAP",
+     "steps": [
+      {
+       "who": "攻击者 A",
+       "to": "链路",
+       "pkt": 1,
+       "bubble": "截获 CR",
+       "hl": [
+        "Code",
+        "Option 1 Value"
+       ],
+       "vals": {
+        "Code": "1 = Configure-Request",
+        "Option 1 Value": "0xC223 + 0x05（要求 CHAP/MD5）"
+       },
+       "say": "中间人截获客户端的 Configure-Request，看到要求的是 CHAP/MD5。",
+       "sub": "这个字段是明文，改起来没有任何门槛。",
+       "evil": true
+      },
+      {
+       "who": "攻击者 A",
+       "to": "服务器 NAS",
+       "pkt": 1,
+       "bubble": "改成 PAP",
+       "hl": [
+        "Option 1 Value",
+        "Option 2 Value"
+       ],
+       "vals": {
+        "Option 1 Value": "0xC023 + 0x05（改成 PAP，只动 2 字节）",
+        "Option 2 Value": "原样保留（避免被怀疑）"
+       },
+       "say": "把 0xC223 改成 0xC023，重算 FCS 后转发给认证方。",
+       "sub": "没有完整性保护，改完两端都不会报错。",
+       "evil": true
+      },
+      {
+       "who": "服务器 NAS",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "Configure-Ack",
+       "hl": [
+        "Code",
+        "Identifier"
+       ],
+       "vals": {
+        "Code": "2 = Configure-Ack（接受了降级）",
+        "Identifier": "回填同一个值"
+       },
+       "say": "服务器接受了 PAP：配置层面看不出异常，链路照常建立。",
+       "sub": "认证强度就这样被静默降了一级。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器 NAS",
+       "pkt": 4,
+       "bubble": "明文口令",
+       "hl": [
+        "Code",
+        "Peer-ID",
+        "Password"
+       ],
+       "vals": {
+        "Code": "1 = Authenticate-Request",
+        "Peer-ID": "alice",
+        "Password": "s3cr3t（明文，6 字节）"
+       },
+       "say": "PAP 把用户名和口令明文送出，抓一次就到手，还能原样重放。",
+       "sub": "这正是 CHAP 要解决的两个问题。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any -X -c 10 'pppoes'",
+        "n": "看信息字段开头的 c2 21 / c2 23 / c0 23，判断协商成了哪种认证",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo tcpdump -ni any -X 'ether proto 0x8864 and ether[20:2] = 0xc023' -c 5",
+        "n": "只抓 PAP：偏移 20 就是 PPP 协议字段，出现 0xC023 即已被降级",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo grep -iE 'auth|chap|pap' /etc/ppp/options",
+        "n": "对照本机配置：没写 refuse-pap 就等于允许降级",
+        "s": "补充（pppd 配置文件，vault 未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetAdapter | Format-Table Name,Status",
+        "n": "降级后链路照样 Up，光看状态发现不了",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh ras show authmode",
+        "n": "看认证模式（需管理员）：pap 允许明文，chap/mschapv2 才是目标",
+        "s": "补充（Windows 自带）"
+       },
+       {
+        "c": "rasdial",
+        "n": "重拨一次看是否仍能连上（降级不会影响连通性）",
+        "s": "补充（Windows 自带）"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "把认证方式锁死在策略里，再用新挑战和强口令把爆破成本抬起来",
+   "lead": "两个攻击对应两道防线：协商阶段不接受降级，认证阶段不接受可预测。",
+   "scenes": [
+    {
+     "name": "锁死 CHAP + 选项白名单 + 周期再认证",
+     "steps": [
+      {
+       "who": "服务器 NAS",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "只接受 CHAP",
+       "hl": [
+        "Code",
+        "Option 1 Value"
+       ],
+       "vals": {
+        "Code": "3 = Configure-Nak / 4 = Configure-Reject",
+        "Option 1 Value": "0xC023 → 直接拒绝，不给 PAP 回退"
+       },
+       "say": "两端强制 chap，禁用 PAP 回退；不合规的选项直接 Reject。",
+       "sub": "认证方式不能由对端建议，只能由策略决定。"
+      },
+      {
+       "who": "服务器 NAS",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "选项白名单",
+       "hl": [
+        "Option 1 Type",
+        "Option 2 Type"
+       ],
+       "vals": {
+        "Option 1 Type": "3（认证协议，必须 CHAP 及以上）",
+        "Option 2 Type": "5（Magic-Number，允许）"
+       },
+       "say": "LCP 选项走白名单：只认已知类型与足够强的算法，其余记日志。",
+       "sub": "老旧 NAS 往往只能开关 PAP，这是现实约束。"
+      },
+      {
+       "who": "服务器 NAS",
+       "to": "客户端",
+       "pkt": 2,
+       "bubble": "新挑战",
+       "hl": [
+        "Identifier",
+        "Value-Size",
+        "Value"
+       ],
+       "vals": {
+        "Identifier": "每次递增，不复用",
+        "Value-Size": "16（与摘要算法一致）",
+        "Value": "每次重新生成的 16 字节随机数"
+       },
+       "say": "每次认证换新挑战，并周期性再认证，把重放窗口压到一次。",
+       "sub": "挑战值可预测，就等于回到 PAP 的处境。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "服务器 NAS",
+       "pkt": 3,
+       "bubble": "重放无效",
+       "hl": [
+        "Code",
+        "Value"
+       ],
+       "vals": {
+        "Code": "4 = Failure（旧摘要对不上）",
+        "Value": "旧 Response → 与新挑战不匹配"
+       },
+       "say": "重放同一条 Response：挑战变了，摘要对不上，直接失败。",
+       "sub": "配合失败计数与告警，连爆破也会留下痕迹。",
+       "evil": true
+      },
+      {
+       "who": "服务器 NAS",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "载荷仍是明文",
+       "hl": [
+        "Protocol",
+        "Information"
+       ],
+       "vals": {
+        "Protocol": "0x0021（认证后就是明文 IP 数据报）",
+        "Information": "认证通过后承载的业务数据"
+       },
+       "say": "CHAP 只解决「你是谁」，认证之后 PPP 载荷仍然明文。",
+       "sub": "要防窃听与篡改，得上 MPPE 或 L2TP over IPsec。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo grep -riE 'refuse-pap|require-mschap|auth' /etc/ppp/ 2>/dev/null",
+        "n": "确认本机 pppd 明确拒绝 PAP，而不是靠「默认」",
+        "s": "补充（pppd 配置，vault 未收录）"
+       },
+       {
+        "c": "sudo tcpdump -ni any -X 'ether proto 0x8864 and ether[20:2] = 0xc023' -c 5",
+        "n": "防护后复测：这条过滤条件应当永远抓不到包",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo ip xfrm state",
+        "n": "有 IPsec 的 SA，就说明 PPP 载荷已被封装加密",
+        "s": "补充（ip xfrm，vault 未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPsecQuickModeSA | Format-Table LocalAddress,RemoteAddress,EncryptionAlgorithm",
+        "n": "快速模式 SA（需管理员）：算法一栏非空即说明链路上有密码学保护",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetAdapter | Format-Table Name,Status",
+        "n": "复测：链路仍 Up，说明加固没有把正常连接谈崩",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh ras show authmode",
+        "n": "复核（需管理员）：认证模式必须只有 chap/mschapv2，没有 pap",
+        "s": "补充（Windows 自带）"
+       },
+       {
+        "c": "rasdial",
+        "n": "重新拨号验证：加固后正常用户仍能认证成功",
+        "s": "补充（Windows 自带）"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

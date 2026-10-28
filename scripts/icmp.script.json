@@ -1,0 +1,574 @@
+{
+ "id": "icmp",
+ "notes": {
+  "Next-Hop MTU": {
+   "short": "这跳能过的最大字节数",
+   "more": "16 位，出现在类型 3 编码 4（需要分片但 DF 置位）里，告诉源端下一跳链路的 MTU 是多少，源端据此调小报文尺寸。这是 PMTUD 的唯一信令。",
+   "sec": "全量封禁 ICMP 会让这条信令回不去，形成「能 ping 通、大包不通」的黑洞。"
+  },
+  "Gateway Internet Address": {
+   "short": "「更好的下一跳」地址",
+   "more": "32 位，重定向报文用它告诉主机：去往某个目的时，直接交给这个网关更近。代码 0/1/2/3 分别对应网络、主机、服务类型三种粒度。",
+   "sec": "伪造这一字段，就等于远程改写别人的路由表。"
+  },
+  "Original IP Header + 8 bytes": {
+   "short": "引用原始报文，可被伪造",
+   "more": "差错报文必须带回触发它的原始 IP 首部与前 8 字节，让源端知道是哪条流出错。至少 28 字节，重定向里也用它证明「我引用的是你的包」。",
+   "sec": "这段引用内容无人核对，攻击者可以凭空编造一个不存在的原始报文。"
+  },
+  "Originate Timestamp": {
+   "short": "毫秒时间戳，泄漏运行时长",
+   "more": "32 位，自世界时午夜起的毫秒数。时间戳请求/应答（13/14）里还有接收与发送时间戳，据此可推测对端的时钟、时区与开机时长。",
+   "sec": "老设备仍会应答，等于免费交出一条时间侧信道。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "四字节头加一段数据：报错、改道、探测，全靠类型与代码区分",
+   "lead": "ICMP 是 IP 的传话人，自己也被封在 IP 里。看四类报文：成对的问答、只回源端的差错、会改行为的重定向。",
+   "scenes": [
+    {
+     "name": "回送 → 差错 → 重定向 → 时间戳",
+     "steps": [
+      {
+       "who": "主机A",
+       "to": "目的服务器",
+       "pkt": 0,
+       "bubble": "Echo Request 类型 8",
+       "hl": [
+        "Type",
+        "Code",
+        "Identifier",
+        "Sequence Number",
+        "Checksum"
+       ],
+       "vals": {
+        "Type": "8（回送请求）",
+        "Code": "0",
+        "Identifier": "0x04d2",
+        "Sequence Number": "1",
+        "Checksum": "覆盖整个 ICMP 报文"
+       },
+       "say": "ping 直接坐在 IP 上，不经过 TCP/UDP——任何端口策略都对它无效。",
+       "sub": "外层 IP 首部的协议字段填 1，表示载荷是 ICMP。"
+      },
+      {
+       "who": "目的服务器",
+       "to": "主机A",
+       "pkt": 0,
+       "bubble": "Echo Reply 类型 0",
+       "hl": [
+        "Type",
+        "Checksum",
+        "Data"
+       ],
+       "vals": {
+        "Type": "0（回送应答）",
+        "Checksum": "重算",
+        "Data": "32 字节载荷原样回填"
+       },
+       "say": "应答把标识、序号和载荷原样回填，只把类型改成 0。",
+       "sub": "载荷本无意义（默认填字母），这正是隧道能塞数据的地方。"
+      },
+      {
+       "who": "网关R1",
+       "to": "主机A",
+       "pkt": 1,
+       "bubble": "类型 3 编码 4：需要分片",
+       "hl": [
+        "Type",
+        "Code",
+        "Next-Hop MTU",
+        "Original IP Header + 8 bytes"
+       ],
+       "vals": {
+        "Type": "3（目的不可达）",
+        "Code": "4（需分片但 DF 置位）",
+        "Next-Hop MTU": "1500",
+        "Original IP Header + 8 bytes": "引用了那个大包"
+       },
+       "say": "装不下又不许分片，路由器只能丢掉并回一条差错，顺带报出这跳 MTU。",
+       "sub": "差错只回源主机，从不发给中间转发者。"
+      },
+      {
+       "who": "网关R1",
+       "to": "主机A",
+       "pkt": 2,
+       "bubble": "类型 5：改走 10.10.10.8",
+       "hl": [
+        "Type",
+        "Code",
+        "Gateway Internet Address"
+       ],
+       "vals": {
+        "Type": "5（重定向）",
+        "Code": "1（基于主机）",
+        "Gateway Internet Address": "10.10.10.8"
+       },
+       "say": "同网段有更近的出口时，网关建议改道——正常网络里极少触发。",
+       "sub": "它假设路由器一定比主机更懂拓扑，且一定可信。"
+      },
+      {
+       "who": "主机A",
+       "to": "目的服务器",
+       "pkt": 3,
+       "bubble": "时间戳请求 类型 13",
+       "hl": [
+        "Type",
+        "Originate Timestamp",
+        "Receive Timestamp",
+        "Transmit Timestamp"
+       ],
+       "vals": {
+        "Type": "13（时间戳请求）",
+        "Originate Timestamp": "0x0a1b2c3d",
+        "Receive Timestamp": "0x0a1b2c50",
+        "Transmit Timestamp": "0x0a1b2c6e"
+       },
+       "say": "时间戳请求不用端口、不用握手，顺手交出一条时间侧信道。",
+       "sub": "三个毫秒时间戳能推出对端时钟与处理时延。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ping -c 4 -s 32 8.8.8.8",
+        "n": "标准 ping：看丢包率与 RTT；-s 指定载荷，载荷改了校验和也得跟着重算",
+        "s": "《系统》Linux.md · ping"
+       },
+       {
+        "c": "ping -M do -s 2000 8.8.8.8",
+        "n": "置 DF 打 2000 字节，应回「Frag needed and DF set」，附下一跳 MTU",
+        "s": "《系统》Linux.md · ping"
+       },
+       {
+        "c": "traceroute -n -I 8.8.8.8",
+        "n": "-I 用 ICMP Echo 探测，每跳靠「超时」差错报文回话",
+        "s": "补充（vault 无 traceroute，看差错报文实际形状）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection 8.8.8.8 -InformationLevel Detailed",
+        "n": "Windows 侧看 ping 是否通、RTT 与源地址，等价于一次 ICMP 探测",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "ping -n 4 8.8.8.8",
+        "n": "-n 指定次数；TTL 值能反推对端系统与经过的跳数",
+        "s": "《系统》Windows CMD.md · ping"
+       },
+       {
+        "c": "tracert -d 8.8.8.8",
+        "n": "逐跳靠 ICMP 超时报错，看差错报文从哪一跳开始缺席",
+        "s": "《系统》Windows CMD.md · tracert"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "一条报文能改路由，一段载荷能开隧道，一个广播能放大几十倍",
+   "lead": "两幕各有侧重：重定向改写主机行为，隧道与放大把 ICMP 当搬运工和放大器。共同点是都没有认证。",
+   "scenes": [
+    {
+     "name": "重定向改路由：一条报文换一条路由",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "受害者主机",
+       "pkt": 2,
+       "bubble": "类型 5｜更好的下一跳 = 攻击者",
+       "evil": true,
+       "hl": [
+        "Type",
+        "Code",
+        "Gateway Internet Address",
+        "Original IP Header + 8 bytes"
+       ],
+       "vals": {
+        "Type": "5（重定向）",
+        "Code": "1（基于主机）",
+        "Gateway Internet Address": "10.10.10.66（攻击者）",
+        "Original IP Header + 8 bytes": "伪造成受害者的原始报文"
+       },
+       "say": "伪造一条重定向，源地址写成网关，字段与校验和全都合法。",
+       "sub": "同网段即可直发，不需要攻破任何设备。"
+      },
+      {
+       "who": "受害者主机",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "接受改道，写进路由表",
+       "hl": [
+        "Gateway Internet Address",
+        "Original IP Header + 8 bytes"
+       ],
+       "vals": {
+        "Gateway Internet Address": "10.10.10.66",
+        "Original IP Header + 8 bytes": "目的 172.16.5.5"
+       },
+       "say": "主机接受建议：去 172.16.5.5 的下一跳改成攻击者，且长期有效。",
+       "sub": "不像 ARP 那样几分钟过期，路由项会一直留着。"
+      },
+      {
+       "who": "受害者主机",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "后续报文全部改道",
+       "hl": [
+        "Type",
+        "Identifier",
+        "Sequence Number"
+       ],
+       "vals": {
+        "Type": "8（回送请求）",
+        "Identifier": "0x04d2",
+        "Sequence Number": "递增"
+       },
+       "say": "之后发往该目标的报文全都绕到攻击者：监听、篡改、丢弃随它。",
+       "sub": "只改一个目的，其他业务正常，最难被发现。"
+      },
+      {
+       "who": "攻击者",
+       "to": "受害者主机",
+       "pkt": 2,
+       "bubble": "每 60 秒重发维持",
+       "evil": true,
+       "hl": [
+        "Type",
+        "Code"
+       ],
+       "vals": {
+        "Type": "5（重定向）",
+        "Code": "1"
+       },
+       "say": "周期重发维持条目：被路由更新覆盖了也会被重新写回。",
+       "sub": "主机路由表里那条是「自己学来的」，排查先怀疑网络。"
+      },
+      {
+       "who": "受害者主机",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "无从核对引用内容",
+       "hl": [
+        "Original IP Header + 8 bytes",
+        "Gateway Internet Address"
+       ],
+       "vals": {
+        "Original IP Header + 8 bytes": "可以凭空编造",
+        "Gateway Internet Address": "10.10.10.66"
+       },
+       "say": "连「引用的原始报文」都能伪造，主机无从确认自己是否真发过那个包。",
+       "sub": "报文层面没有任何畸形字段可查。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any 'icmp[icmptype] == 5'",
+        "n": "只抓重定向：正常网络里应该一条都没有，出现即异常",
+        "s": "补充（vault 无 tcpdump，重定向取证必备）"
+       },
+       {
+        "c": "sysctl net.ipv4.conf.all.accept_redirects net.ipv4.conf.eth0.accept_redirects",
+        "n": "1 表示愿意接受改道建议；改 0 是主机侧最省事的防护",
+        "s": "补充（vault 无 accept_redirects 小节）"
+       },
+       {
+        "c": "ip route get 172.16.5.5",
+        "n": "看这个目的实际走哪个下一跳，被劫持时这里会是攻击者地址",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Select-Object NextHop,RouteMetric",
+        "n": "默认路由的下一跳；出现陌生下一跳说明路由被改过",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh int ipv4 show route",
+        "n": "整张 IPv4 路由表，重点看目标前缀后面那列网关地址",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    },
+    {
+     "name": "隐蔽隧道与 Smurf 放大：把它当搬运工",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "边界防火墙",
+       "pkt": 0,
+       "bubble": "Echo 类型 8｜载荷换成数据",
+       "evil": true,
+       "hl": [
+        "Type",
+        "Identifier",
+        "Data"
+       ],
+       "vals": {
+        "Type": "8（回送请求）",
+        "Identifier": "0x04d2（会话号）",
+        "Data": "命令分片，重算校验和"
+       },
+       "say": "把载荷换成数据，类型仍是最常见的回送请求——排障放行的口子成了通道。",
+       "sub": "标识符被复用成会话号，一台主机可开多条通道。"
+      },
+      {
+       "who": "边界防火墙",
+       "to": "内网跳板",
+       "pkt": 0,
+       "bubble": "按类型放行，不看载荷",
+       "hl": [
+        "Type",
+        "Code"
+       ],
+       "vals": {
+        "Type": "8 / 0 放行",
+        "Code": "0"
+       },
+       "say": "没有端口可查：端口策略与主机监听检查都抓不到这条通道。",
+       "sub": "载荷内容不在任何规则里，只能靠行为检测。"
+      },
+      {
+       "who": "内网跳板",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "Echo Reply｜回传命令输出",
+       "hl": [
+        "Type",
+        "Data"
+       ],
+       "vals": {
+        "Type": "0（回送应答）",
+        "Data": "Base64 后的命令输出"
+       },
+       "say": "应答字节数明显大于请求，形成上下行不对称——行为特征的起点。",
+       "sub": "内核直接处理，不占任何监听端口。"
+      },
+      {
+       "who": "攻击者",
+       "to": "放大网段",
+       "pkt": 0,
+       "bubble": "源=受害者，目的=定向广播",
+       "evil": true,
+       "hl": [
+        "Type",
+        "Data",
+        "Identifier"
+       ],
+       "vals": {
+        "Type": "8（回送请求）",
+        "Data": "目的 192.168.5.255 定向广播",
+        "Identifier": "源地址=受害者"
+       },
+       "say": "换一种用法：源地址写成受害者，目的写成整个网段的广播地址。",
+       "sub": "只要边界还转发定向广播，这一跳就是放大器。"
+      },
+      {
+       "who": "网段内主机",
+       "to": "受害者",
+       "pkt": 0,
+       "bubble": "Echo Reply ×N → 受害者",
+       "hl": [
+        "Type",
+        "Code"
+       ],
+       "vals": {
+        "Type": "0（回送应答）",
+        "Code": "目的=受害者地址"
+       },
+       "say": "每台主机各回一条应答，一份请求换来几十倍流量砸在受害者身上。",
+       "sub": "放大倍数约等于网段内存活主机数。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any 'icmp and greater 100'",
+        "n": "抓大于 100 字节的 ICMP：隧道载荷普遍比正常 ping 大且长度固定",
+        "s": "补充（vault 无 tcpdump，隧道取证必备）"
+       },
+       {
+        "c": "ping -c 3 -s 1200 8.8.8.8",
+        "n": "自己发个大包 ping 作对照，比较载荷分布与响应字节数",
+        "s": "《系统》Linux.md · ping"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'icmp[icmptype] == 8 and dst net 192.168.5.0/24'",
+        "n": "抓发往某网段的 Echo 请求，源地址不在本网段即为 Smurf 素材",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection 8.8.8.8 -InformationLevel Detailed",
+        "n": "本机能否发 ICMP 出去：能通了才谈得上隧道",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh int ipv4 show global",
+        "n": "看本机 IPv4 全局参数（转发、路由行为），判断是否在替别人放大",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "主机不轻信、网关不乱发、网络不放任，三条线分别掐断一招",
+   "lead": "口诀只有三句，落点很清楚：改行为的报文别信，被放行的类型要看载荷，放大器要关掉。",
+   "scenes": [
+    {
+     "name": "不轻信 / 不乱发 / 不放任",
+     "steps": [
+      {
+       "who": "受害者主机",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "accept_redirects=0",
+       "hl": [
+        "Type",
+        "Code",
+        "Gateway Internet Address"
+       ],
+       "vals": {
+        "Type": "5 → 丢弃",
+        "Code": "1",
+        "Gateway Internet Address": "10.10.10.66"
+       },
+       "say": "主机侧不轻信：重定向报文根本不进路由表，改道建议一律无效。",
+       "sub": "正常网络里重定向极少出现，关掉几乎零代价。"
+      },
+      {
+       "who": "网关R1",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "非网关发出的重定向 → 丢弃",
+       "hl": [
+        "Type",
+        "Code",
+        "Gateway Internet Address"
+       ],
+       "vals": {
+        "Type": "5",
+        "Code": "1",
+        "Gateway Internet Address": "不是本机地址"
+       },
+       "say": "网关侧不乱发：只允许网关自己发重定向，其他来源一律丢。",
+       "sub": "同时检查路由表是否出现异常下一跳。"
+      },
+      {
+       "who": "边界防火墙",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "类型白名单 + 载荷行为检测",
+       "hl": [
+        "Type",
+        "Code",
+        "Data"
+       ],
+       "vals": {
+        "Type": "只留 0/8、3/3、3/4、11/0",
+        "Code": "其余丢弃",
+        "Data": "长度 / 熵 / 请求响应对称性"
+       },
+       "say": "白名单只留必要组合；隧道走的正是被放行的 0/8，得靠载荷行为抓。",
+       "sub": "大小集中、熵偏高、响应明显大于请求，三条同时成立。"
+      },
+      {
+       "who": "边界路由器",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "关闭定向广播转发",
+       "hl": [
+        "Type",
+        "Data"
+       ],
+       "vals": {
+        "Type": "8 → 定向广播被拒",
+        "Data": "no ip directed-broadcast"
+       },
+       "say": "关掉定向广播转发，Smurf 的放大器那一跳直接被拆掉。",
+       "sub": "没有放大器，伪造源地址也只能一对一。"
+      },
+      {
+       "who": "接入路由器",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "入口过滤：源不在本网段即丢",
+       "hl": [
+        "Type",
+        "Identifier"
+       ],
+       "vals": {
+        "Type": "8",
+        "Identifier": "源地址属于本网段才放行"
+       },
+       "say": "入口过滤让伪造源地址发不出去，放大链两头同时断。",
+       "sub": "边界与接入要一起配，缺一环放大链就成立。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo sysctl -w net.ipv4.conf.all.accept_redirects=0",
+        "n": "立刻关闭重定向接收，改完可用 ip route get 复查下一跳",
+        "s": "补充（vault 无 accept_redirects 小节）"
+       },
+       {
+        "c": "sudo iptables -A INPUT -p icmp --icmp-type redirect -j DROP",
+        "n": "在主机防火墙上直接丢掉类型 5，作为 sysctl 之外的第二道",
+        "s": "补充（iptables 规则，vault 无）"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'icmp[icmptype] == 5 or (icmp and greater 100)'",
+        "n": "同时盯重定向与大载荷 ICMP，两条防线一次验证",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetFirewallRule -DisplayName '*ICMP*' | Select-Object DisplayName,Enabled",
+        "n": "列出与 ICMP 相关的防火墙规则，确认没有把类型 5 放进来",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall firewall show rule name=all | findstr /i icmp",
+        "n": "看哪些 ICMP 规则生效；规则越少，可被利用的类型越少",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "route print -4",
+        "n": "核对路由表有没有多出来的主机路由（重定向留下的痕迹）",
+        "s": "《系统》Windows CMD.md · 网络命令"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

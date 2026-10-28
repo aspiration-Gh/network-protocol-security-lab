@@ -1,0 +1,839 @@
+{
+ "id": "tcp",
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "三次握手、传输、挥手：整条连接的状态只记在两个序号里",
+   "lead": "先看它跑通一次。注意两件事：序号决定顺序，标志位决定状态。",
+   "scenes": [
+    {
+     "name": "建连 → 传数据 → 挥手",
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "SYN",
+       "hl": [
+        "Source Port",
+        "Sequence Number",
+        "Flags"
+       ],
+       "vals": {
+        "Source Port": "49572",
+        "Destination Port": "443",
+        "Sequence Number": "x = 0x3a2c17",
+        "Flags": "SYN",
+        "Acknowledgment Number": "0"
+       },
+       "say": "客户端挑一个随机源端口，把初始序号 x 放进首部，只置 SYN 标志。",
+       "sub": "此时双方还没有任何连接状态，服务器不知道这是新客户还是重传。",
+       "p": {
+        "src": "192.168.1.100",
+        "dst": "93.184.216.34",
+        "sport": 49572,
+        "dport": 443,
+        "seq": 3812375,
+        "ack": 0,
+        "flags": "S",
+        "win": 64240,
+        "payload": "",
+        "opts": "syn"
+       }
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "SYN+ACK",
+       "hl": [
+        "Sequence Number",
+        "Acknowledgment Number",
+        "Flags",
+        "MSS Option"
+       ],
+       "vals": {
+        "Source Port": "443",
+        "Destination Port": "49572",
+        "Sequence Number": "y = 0x8f2b41",
+        "Acknowledgment Number": "x+1",
+        "Flags": "SYN, ACK",
+        "MSS Option": "1460"
+       },
+       "say": "服务器回自己的序号 y，并确认 x+1；顺手用 MSS 选项报出能收多大段。",
+       "sub": "这一步服务器已经为连接分配了 TCB（传输控制块）——资源在验证对端之前就花掉了。",
+       "p": {
+        "src": "93.184.216.34",
+        "dst": "192.168.1.100",
+        "sport": 443,
+        "dport": 49572,
+        "seq": 9382721,
+        "ack": 3812376,
+        "flags": "SA",
+        "win": 65160,
+        "payload": "",
+        "opts": "syn"
+       }
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "ACK",
+       "hl": [
+        "Acknowledgment Number",
+        "Flags"
+       ],
+       "vals": {
+        "Sequence Number": "x+1",
+        "Acknowledgment Number": "y+1",
+        "Flags": "ACK"
+       },
+       "say": "第三次握手是一个裸 ACK：确认 y+1，连接进入 ESTABLISHED。",
+       "sub": "SYN 和 FIN 各占 1 个序号，所以下一个字节从 x+1 开始。",
+       "p": {
+        "src": "192.168.1.100",
+        "dst": "93.184.216.34",
+        "sport": 49572,
+        "dport": 443,
+        "seq": 3812376,
+        "ack": 9382722,
+        "flags": "A",
+        "win": 64240,
+        "payload": "",
+        "opts": ""
+       }
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "PSH+ACK",
+       "hl": [
+        "Sequence Number",
+        "Acknowledgment Number",
+        "Checksum"
+       ],
+       "vals": {
+        "Sequence Number": "x+1",
+        "Acknowledgment Number": "y+1",
+        "Flags": "PSH, ACK",
+        "Checksum": "0x7c00"
+       },
+       "say": "数据按字节编号：发出 200 字节，序号仍从 x+1 起，一个字节一个号。",
+       "sub": "校验和覆盖「伪首部 + 首部 + 数据」，伪首部里的源/目的 IP 让它无法被单独伪造。",
+       "p": {
+        "src": "192.168.1.100",
+        "dst": "93.184.216.34",
+        "sport": 49572,
+        "dport": 443,
+        "seq": 3812376,
+        "ack": 9382722,
+        "flags": "PA",
+        "win": 64240,
+        "payload": "GET / HTTP/1.1\r\n",
+        "opts": ""
+       }
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "ACK",
+       "hl": [
+        "Acknowledgment Number",
+        "Window"
+       ],
+       "vals": {
+        "Sequence Number": "y+1",
+        "Acknowledgment Number": "x+201",
+        "Flags": "ACK",
+        "Window": "0xfaf0"
+       },
+       "say": "服务器确认到 x+201：确认号永远表示「我下一个想要的字节」。",
+       "sub": "窗口字段告诉对方还能发多少——这个数字直接决定吞吐，也决定泄漏多少缓冲信息。",
+       "p": {
+        "src": "93.184.216.34",
+        "dst": "192.168.1.100",
+        "sport": 443,
+        "dport": 49572,
+        "seq": 9382722,
+        "ack": 3812392,
+        "flags": "A",
+        "win": 64240,
+        "payload": "",
+        "opts": ""
+       }
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "FIN+ACK",
+       "hl": [
+        "Flags",
+        "Sequence Number"
+       ],
+       "vals": {
+        "Sequence Number": "x+201",
+        "Acknowledgment Number": "y+1",
+        "Flags": "FIN, ACK"
+       },
+       "say": "传完了发 FIN；双方各确认一次，主动关闭方进入 TIME_WAIT 等 2MSL。",
+       "sub": "TIME_WAIT 不是为了礼貌：它让迟到的旧报文自然死掉，也让最后的 ACK 有重传机会。",
+       "p": {
+        "src": "192.168.1.100",
+        "dst": "93.184.216.34",
+        "sport": 49572,
+        "dport": 443,
+        "seq": 3812392,
+        "ack": 9382722,
+        "flags": "FA",
+        "win": 64240,
+        "payload": "",
+        "opts": ""
+       }
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any 'tcp[tcpflags] & (tcp-syn|tcp-fin) != 0'",
+        "n": "只抓 SYN/FIN：握手与挥手在屏幕上一行一条",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       },
+       {
+        "c": "ss -tanie 'dport = :443'",
+        "n": "-e 显示 socket 细节，-i 显示 rtt 与已收/已发字节，相当于看这条连接的序号进度",
+        "s": "《系统》Linux.md · ss"
+       },
+       {
+        "c": "curl -sv https://example.com -o /dev/null",
+        "n": "-v 打出 TLS 握手与证书链，验证第 3 次握手之后发生了什么",
+        "s": "《系统》Linux.md · curl"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection example.com -Port 443 -InformationLevel Detailed",
+        "n": "本机视角看能不能建连、RTT 多少（等价 ss 的已验证连接）",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       },
+       {
+        "c": "Get-NetTCPConnection -RemotePort 443 | Select LocalPort,RemoteAddress,State",
+        "n": "列本机连到 443 的所有连接与状态",
+        "s": "《系统》PowerShell.md · Get-NetTCPConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -ano | findstr :443",
+        "n": "连接 + 所属 PID，最老的排障起手式",
+        "s": "《系统》Windows CMD.md · 5. 网络命令"
+       },
+       {
+        "c": "netstat -an | findstr ESTABLISHED",
+        "n": "只看已建立连接，判断是不是真的连上了",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "两个著名攻击，改动的字节都不超过 4 个",
+   "lead": "同一个舞台，换个发报文的人。注意攻击者只动了哪几个字段。",
+   "scenes": [
+    {
+     "name": "SYN 泛洪：把半连接队列耗干",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "SYN ×N",
+       "evil": true,
+       "hl": [
+        "Source Port",
+        "Sequence Number",
+        "Flags"
+       ],
+       "vals": {
+        "Source Port": "随机",
+        "Sequence Number": "随机",
+        "Flags": "SYN"
+       },
+       "say": "源 IP 全部伪造，每一包的源端口与序号都不同，看起来像成千上万个新客户。",
+       "sub": "服务器无法从地址上分辨真假——网络层不认证源，这是全链条的起点。",
+       "p": {
+        "src": "203.0.113.7",
+        "dst": "93.184.216.34",
+        "sport": 40001,
+        "dport": 443,
+        "seq": 287454020,
+        "ack": 0,
+        "flags": "S",
+        "win": 64240,
+        "payload": "",
+        "opts": ""
+       }
+      },
+      {
+       "who": "服务器",
+       "to": "伪造源",
+       "pkt": 0,
+       "bubble": "SYN+ACK",
+       "hl": [
+        "Sequence Number",
+        "Acknowledgment Number"
+       ],
+       "vals": {
+        "Sequence Number": "y",
+        "Acknowledgment Number": "x+1",
+        "Flags": "SYN, ACK"
+       },
+       "say": "服务器照规矩回 SYN+ACK，并为每个请求建一个 TCB，放进半连接队列。",
+       "sub": "代价在这里：一个 60 字节的 SYN，换来内核里几百字节的状态和几秒的占用。",
+       "p": {
+        "src": "93.184.216.34",
+        "dst": "203.0.113.7",
+        "sport": 443,
+        "dport": 40001,
+        "seq": 1432778632,
+        "ack": 287454021,
+        "flags": "SA",
+        "win": 65160,
+        "payload": "",
+        "opts": "syn"
+       }
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "重传 SYN+ACK",
+       "evil": true,
+       "hl": [
+        "Flags"
+       ],
+       "vals": {
+        "Flags": "—"
+       },
+       "say": "伪造的源收不到 SYN+ACK，自然也不会回 ACK；半连接只能等超时被丢弃。",
+       "sub": "重传 SYN+ACK 会让每个半连接多活几秒，队列被拖得更满。",
+       "p": {
+        "src": "93.184.216.34",
+        "dst": "203.0.113.7",
+        "sport": 443,
+        "dport": 40001,
+        "seq": 1432778632,
+        "ack": 287454021,
+        "flags": "SA",
+        "win": 65160,
+        "payload": "",
+        "opts": "syn"
+       }
+      },
+      {
+       "who": "受害者",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "SYN（正常客户）",
+       "hl": [
+        "Flags"
+       ],
+       "vals": {
+        "Flags": "SYN"
+       },
+       "say": "队列满了，真正的客户发来的 SYN 直接被丢——它只会看到超时。",
+       "sub": "此时服务器 CPU 空闲、内存空闲，监控上的连接数看起来也正常。",
+       "p": {
+        "src": "192.168.1.77",
+        "dst": "93.184.216.34",
+        "sport": 51000,
+        "dport": 443,
+        "seq": 2004287489,
+        "ack": 0,
+        "flags": "S",
+        "win": 64240,
+        "payload": "",
+        "opts": ""
+       }
+      },
+      {
+       "who": "服务器",
+       "to": "受害者",
+       "pkt": 0,
+       "bubble": "SYN（被丢弃）",
+       "hl": [
+        "Flags"
+       ],
+       "vals": {
+        "Flags": "—"
+       },
+       "say": "服务对外不可用：不是算力被打垮，是「建连的资源」被占满。",
+       "sub": "所以这类攻击靠加 CPU 解决不了，必须改资源分配时机或验证源的真实性。",
+       "p": {
+        "src": "192.168.1.77",
+        "dst": "93.184.216.34",
+        "sport": 51000,
+        "dport": 443,
+        "seq": 2004287489,
+        "ack": 0,
+        "flags": "S",
+        "win": 64240,
+        "payload": "",
+        "opts": ""
+       }
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ss -tan state syn-recv | wc -l",
+        "n": "半连接（SYN_RECV）条数：正常个位，被泛洪时上千",
+        "s": "《系统》Linux.md · ss"
+       },
+       {
+        "c": "ss -s",
+        "n": "一行汇总：synrecv / timewait / estab 各多少，判断卡在哪一状态",
+        "s": "《系统》Linux.md · ss"
+       },
+       {
+        "c": "sudo sysctl net.ipv4.tcp_syncookies",
+        "n": "看到 =1 说明 Cookie 已开，=0 说明半连接真的会排队",
+        "s": "补充（内核参数）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "(Get-NetTCPConnection -State SynReceived).Count",
+        "n": "本机半连接计数，对应 ss -tan state syn-recv | wc -l",
+        "s": "《系统》PowerShell.md · Get-NetTCPConnection"
+       },
+       {
+        "c": "Get-NetTCPConnection -LocalPort 443 | Group-Object State | Format-Table",
+        "n": "按状态分组，一眼看出 Listen/SynReceived/Established 的比例",
+        "s": "《系统》PowerShell.md · Get-NetTCPConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -an | findstr SYN_RECEIVED",
+        "n": "半连接列表（Windows 里叫 SYN_RECEIVED）",
+        "s": "《系统》Windows CMD.md · netstat"
+       },
+       {
+        "c": "netsh int tcp show global",
+        "n": "看系统级 TCP 参数，含 SYN 攻击保护开关",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    },
+    {
+     "name": "会话劫持：序号被看穿之后",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "嗅探",
+       "evil": true,
+       "hl": [
+        "Source Port",
+        "Sequence Number",
+        "Acknowledgment Number"
+       ],
+       "vals": {
+        "Source Port": "49572",
+        "Destination Port": "443",
+        "Sequence Number": "x+n",
+        "Acknowledgment Number": "y+m"
+       },
+       "say": "同网段（共享介质、MAC 泛洪、ARP 欺骗）就能被动看到四元组与两个序号。",
+       "sub": "序号不是秘密，它只是「进度」；一旦被看到，凭据就只剩地址了。",
+       "p": {
+        "src": "192.168.1.100",
+        "dst": "93.184.216.34",
+        "sport": 49572,
+        "dport": 443,
+        "seq": 3812392,
+        "ack": 9382722,
+        "flags": "PA",
+        "win": 64240,
+        "payload": "GET /admin HTTP/1.1\r\n",
+        "opts": ""
+       }
+      },
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "伪造 RST",
+       "evil": true,
+       "hl": [
+        "Sequence Number",
+        "Flags"
+       ],
+       "vals": {
+        "Sequence Number": "落在接收窗口内",
+        "Flags": "RST"
+       },
+       "say": "先发一个序号落在窗口内的 RST，把真客户端踢下线。",
+       "sub": "服务器只检查序号是否落在窗口内，RFC 5961 之前连这步都不严格。",
+       "p": {
+        "src": "203.0.113.7",
+        "dst": "93.184.216.34",
+        "sport": 49572,
+        "dport": 443,
+        "seq": 3812412,
+        "ack": 0,
+        "flags": "R",
+        "win": 64240,
+        "payload": "",
+        "opts": ""
+       }
+      },
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "伪造数据",
+       "evil": true,
+       "hl": [
+        "Sequence Number",
+        "Acknowledgment Number",
+        "Flags"
+       ],
+       "vals": {
+        "Sequence Number": "x+n",
+        "Acknowledgment Number": "y+m",
+        "Flags": "PSH, ACK"
+       },
+       "say": "用受害者的四元组与正确序号发数据，服务器认不出这是另一个人。",
+       "sub": "TCP 没有会话凭据：身份 = 四元组 + 序号，而这两样都能被看到。",
+       "p": {
+        "src": "203.0.113.7",
+        "dst": "93.184.216.34",
+        "sport": 49572,
+        "dport": 443,
+        "seq": 3812412,
+        "ack": 9382722,
+        "flags": "PA",
+        "win": 64240,
+        "payload": "POST /admin\r\n",
+        "opts": ""
+       }
+      },
+      {
+       "who": "服务器",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "ACK（发给攻击者）",
+       "hl": [
+        "Acknowledgment Number"
+       ],
+       "vals": {
+        "Acknowledgment Number": "x+n+len"
+       },
+       "say": "会话被接管：之后的对话发生在攻击者与服务器之间，受害者被静默踢出。",
+       "sub": "若上层是明文 HTTP，接下来的 Cookie、口令全部落到攻击者手里。",
+       "p": {
+        "src": "93.184.216.34",
+        "dst": "203.0.113.7",
+        "sport": 443,
+        "dport": 49572,
+        "seq": 9382722,
+        "ack": 3812432,
+        "flags": "A",
+        "win": 64240,
+        "payload": "",
+        "opts": ""
+       }
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any -A 'tcp port 443 and host 192.168.1.100'",
+        "n": "-A 打 ASCII：明文协议下序号与数据一起现形",
+        "s": "补充（抓包必备）"
+       },
+       {
+        "c": "ip neigh",
+        "n": "邻居表：网关的 MAC 是否被改成攻击者（ARP 投毒是劫持前置）",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "sudo ss -tanie 'dport = :443'",
+        "n": "看这条连接的 uid/ino，判断是不是自己的进程",
+        "s": "《系统》Linux.md · ss"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetNeighbor -AddressFamily IPv4 | Where-Object State -eq Reachable",
+        "n": "等价于 arp -a，看网关 MAC 有没有变",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       },
+       {
+        "c": "Get-Process -Id (Get-NetTCPConnection -RemotePort 443).OwningProcess",
+        "n": "反查占用连接的是哪个进程，识别可疑会话",
+        "s": "《系统》PowerShell.md · 进程管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "arp -a",
+        "n": "网关 IP 对应的 MAC，若与路由器标签不符即为投毒",
+        "s": "《系统》Windows CMD.md · 5. 网络命令"
+       },
+       {
+        "c": "netstat -ano | findstr ESTABLISHED",
+        "n": "找陌生外部地址的已建立连接",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "同一场泛洪重放一遍，这次服务器不再为未验证的源分配资源",
+   "lead": "防护不是把攻击「挡住」，而是让它变得不划算。看资源分配被推迟到哪一步。",
+   "scenes": [
+    {
+     "name": "SYN Cookie 让泛洪失去收益",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "SYN（伪造）",
+       "evil": true,
+       "hl": [
+        "Sequence Number",
+        "Flags"
+       ],
+       "vals": {
+        "Sequence Number": "随机",
+        "Flags": "SYN"
+       },
+       "say": "攻击一模一样地重放：伪造源、海量 SYN。",
+       "sub": "同样的输入，不同的处理方式——这就是防护要改的地方。",
+       "p": {
+        "src": "203.0.113.7",
+        "dst": "93.184.216.34",
+        "sport": 40001,
+        "dport": 443,
+        "seq": 287454020,
+        "ack": 0,
+        "flags": "S",
+        "win": 64240,
+        "payload": "",
+        "opts": "syn"
+       }
+      },
+      {
+       "who": "服务器",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "算 cookie",
+       "hl": [
+        "Sequence Number",
+        "Data Offset / Reserved"
+       ],
+       "vals": {
+        "Sequence Number": "cookie = H(四元组, 时间)",
+        "Flags": "—"
+       },
+       "say": "服务器不建 TCB，只用「四元组 + 时间 + 秘密」算一个哈希当初始序号。",
+       "sub": "状态被编码进报文，而不是放进内存：队列里没有可耗尽的东西。",
+       "p": {
+        "src": "203.0.113.7",
+        "dst": "93.184.216.34",
+        "sport": 40001,
+        "dport": 443,
+        "seq": 287454020,
+        "ack": 0,
+        "flags": "S",
+        "win": 64240,
+        "payload": "",
+        "opts": "syn"
+       }
+      },
+      {
+       "who": "服务器",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "SYN+ACK",
+       "hl": [
+        "Sequence Number",
+        "Flags",
+        "MSS Option"
+       ],
+       "vals": {
+        "Sequence Number": "cookie",
+        "Acknowledgment Number": "x+1",
+        "Flags": "SYN, ACK",
+        "MSS Option": "编码在首部"
+       },
+       "say": "SYN+ACK 照发，但序号里装的是 cookie；服务器一个字节状态都没留。",
+       "sub": "代价：MSS、窗口扩大这些选项没法在 SYN 阶段协商，得挤进编码位或延后。",
+       "p": {
+        "src": "93.184.216.34",
+        "dst": "203.0.113.7",
+        "sport": 443,
+        "dport": 40001,
+        "seq": 2621405729,
+        "ack": 287454021,
+        "flags": "SA",
+        "win": 65160,
+        "payload": "",
+        "opts": "syn"
+       }
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "不回 ACK",
+       "evil": true,
+       "hl": [
+        "Flags"
+       ],
+       "vals": {
+        "Flags": "—"
+       },
+       "say": "攻击者依旧不回 ACK，但这次服务器什么也不用丢——本来就没占资源。",
+       "sub": "泛洪的「每包成本」从几百字节降到零，攻击规模立刻失去意义。",
+       "p": {
+        "src": "93.184.216.34",
+        "dst": "203.0.113.7",
+        "sport": 443,
+        "dport": 40001,
+        "seq": 2621405729,
+        "ack": 287454021,
+        "flags": "SA",
+        "win": 65160,
+        "payload": "",
+        "opts": "syn"
+       }
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "ACK = cookie+1",
+       "hl": [
+        "Acknowledgment Number",
+        "Flags"
+       ],
+       "vals": {
+        "Acknowledgment Number": "cookie+1",
+        "Flags": "ACK"
+       },
+       "say": "真客户带着 cookie+1 回来，服务器重算一遍对得上，这才分配 TCB。",
+       "sub": "同一个机制顺带解决了源伪造：算不出 cookie 的源，建不成连接。",
+       "p": {
+        "src": "192.168.1.77",
+        "dst": "93.184.216.34",
+        "sport": 51000,
+        "dport": 443,
+        "seq": 287454021,
+        "ack": 2621405730,
+        "flags": "A",
+        "win": 64240,
+        "payload": "",
+        "opts": ""
+       }
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "ESTABLISHED",
+       "hl": [
+        "Flags",
+        "Window",
+        "Timestamps Option"
+       ],
+       "vals": {
+        "Flags": "ACK",
+        "Window": "0xfaf0",
+        "Timestamps Option": "启用"
+       },
+       "say": "连接正常建立；配合随机 ISN 与 TLS，劫持那条路也一并堵上。",
+       "sub": "随机 ISN（RFC 6528）让盲猜失效；TLS 让嗅探到序号也没用，因为内容已加密且带完整性校验。",
+       "p": {
+        "src": "93.184.216.34",
+        "dst": "192.168.1.77",
+        "sport": 443,
+        "dport": 51000,
+        "seq": 2621405730,
+        "ack": 287454021,
+        "flags": "A",
+        "win": 64240,
+        "payload": "",
+        "opts": ""
+       }
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo sysctl -w net.ipv4.tcp_syncookies=1",
+        "n": "打开 SYN Cookie：半连接不再排队（临时生效）",
+        "s": "补充（内核参数）"
+       },
+       {
+        "c": "sudo sysctl -w net.ipv4.tcp_max_syn_backlog=2048",
+        "n": "Cookie 之外的兜底：队列上限，别设到内存撑爆",
+        "s": "补充（内核参数）"
+       },
+       {
+        "c": "ss -tan state syn-recv | wc -l",
+        "n": "防护后再测同一指标：数字不再随攻击增长就是生效了",
+        "s": "《系统》Linux.md · ss"
+       }
+      ],
+      "ps": [
+       {
+        "c": "New-NetFirewallRule -DisplayName 'Allow-443' -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow",
+        "n": "等价于在边界放行/收敛 443，先有规则再谈防护",
+        "s": "《系统》PowerShell.md · 服务与进程/网络"
+       },
+       {
+        "c": "Test-NetConnection example.com -Port 443",
+        "n": "防护生效后复测：正常客户必须还能连上",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall firewall add rule name=\"Allow-443\" dir=in action=allow protocol=TCP localport=443",
+        "n": "命令行加放行规则，与图形界面等价",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "netsh int tcp show global",
+        "n": "复查系统 TCP 参数是否被改回",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

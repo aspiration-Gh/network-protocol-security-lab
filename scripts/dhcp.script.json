@@ -1,0 +1,641 @@
+{
+ "id": "dhcp",
+ "notes": {
+  "xid": {
+   "short": "事务标识，配对请求与应答",
+   "more": "4 字节随机数，客户端生成，服务器在 OFFER/ACK 中原样返回。客户端只靠它确认“这条应答回的是我的请求”，不校验对方身份。",
+   "sec": "只要 xid 对上，伪造应答就能被接受——这是仿冒服务器唯一必须猜对的字段。"
+  },
+  "chaddr": {
+   "short": "客户端 MAC，地址按它记忆",
+   "more": "16 字节，前 hlen（6）字节有效。服务器按这个 MAC 分配与记忆地址，因此改 chaddr 就等于换了一台新机器。",
+   "sec": "饥饿攻击伪造的就是这里；Snooping 校验的也是这里。"
+  },
+  "yiaddr": {
+   "short": "分给客户端的地址，可任意填",
+   "more": "“your IP”。服务器在 OFFER/ACK 中填入选定的地址，客户端在收到 ACK 后把它配到网卡上。仿冒服务器可以填任意值。",
+   "sec": "填成隔离网段或攻击者主机的地址，就等于把客户端引走。"
+  },
+  "giaddr": {
+   "short": "中继地址，服务器完全相信它",
+   "more": "中继代理转发时填入自己面向客户端的接口地址，服务器据此判断请求来自哪个子网并从对应地址池取地址。",
+   "sec": "伪造 giaddr 就能让服务器从别的子网发地址，造成跨网段错配。"
+  },
+  "opt53": {
+   "short": "报文类型，8 种之一",
+   "more": "TLV 结构：0x35 + 长度 1 + 值。1 DISCOVER、2 OFFER、3 REQUEST、5 ACK、6 NAK、7 RELEASE，每个报文的第一条选项都是它。",
+   "sec": "终端只会发 1/3/7/8，出现 2/5/6 就说明有“服务器”在这个端口上说话。"
+  },
+  "opt61": {
+   "short": "客户端标识，真正的身份字段",
+   "more": "长度 7：类型 1（以太网）+ 6 字节 MAC。它才是“客户端身份”的正式表达，服务器应当用它而非 chaddr 做绑定，避免语义重叠。",
+   "sec": "只改 chaddr 不改 opt61 的实现会被识别为同一个人。"
+  },
+  "opt51-val": {
+   "short": "租期，写多长就绑多久",
+   "more": "32 位秒数。客户端据此算出 T1=0.5T 续租、T2=0.875T 改广播，到期必须停用地址。",
+   "sec": "写成 4294967295 等于让错误配置在重启前永不失效，异常长租期是硬检测规则。"
+  },
+  "opt54-val": {
+   "short": "服务器标识，客户端认谁",
+   "more": "合法服务器的 IPv4 地址，客户端此后把 REQUEST 单播到这个地址。它决定了客户端心里“谁是服务器”。",
+   "sec": "仿冒者把它写自己，客户端之后所有续租都只找攻击者。"
+  },
+  "opt03-val": {
+   "short": "默认网关，全部出网流量的第一跳",
+   "more": "可含多个地址，客户端所有非本地流量都发往这里。它是把“配错地址”升级为“全面中间人”的那一个开关。",
+   "sec": "改成攻击者主机，明文凭据与全部流量都先过他手。"
+  },
+  "opt06-val": {
+   "short": "DNS 服务器，解析结果的来源",
+   "more": "客户端的首选解析器。改了它，后续所有域名解析都可被引导到攻击者指定的地址，也是伪造站点最省事的一步。",
+   "sec": "网关与 DNS 同时被改，等于把出网判断和名字解析一起接管。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "四报文换来四参数：谁能先答，谁就赢",
+   "lead": "先看一次开机取址。注意客户端在拿到配置之前没有任何身份，也没有任何验证手段。",
+   "scenes": [
+    {
+     "name": "DORA 四报文与续租",
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo dhclient -v eth0",
+        "n": "-v 打印完整 DORA 四步与拿到的租期",
+        "s": "补充（vault 无 dhclient，DHCP 客户端调试必备）"
+       },
+       {
+        "c": "sudo tcpdump -ni eth0 -vv 'udp port 67 or udp port 68'",
+        "n": "抓 DORA：看 xid 是否配对、yiaddr 是多少",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       },
+       {
+        "c": "ip addr show eth0",
+        "n": "拿到的地址与掩码，与 ACK 里的 opt1 对照",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv4 | Select-Object InterfaceAlias,IPAddress,PrefixLength",
+        "n": "地址、掩码、接口一屏看完",
+        "s": "《系统》PowerShell.md · Get-NetIPAddress"
+       },
+       {
+        "c": "Get-NetIPConfiguration -Detailed",
+        "n": "网关、DNS、DHCP 服务器是谁，一条命令全出",
+        "s": "补充（vault 未收录 Get-NetIPConfiguration）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "ipconfig /all",
+        "n": "租约获得与到期时间、DHCP 服务器地址都在里面",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       },
+       {
+        "c": "netsh interface ip show config",
+        "n": "每块网卡的完整配置，含 DHCP 是否启用",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "广播",
+       "pkt": 0,
+       "bubble": "DISCOVER",
+       "hl": [
+        "op",
+        "xid",
+        "chaddr",
+        "opt53"
+       ],
+       "vals": {
+        "op": "1 BOOTREQUEST",
+        "xid": "0x3d1e2f4a",
+        "chaddr": "00:11:22:33:44:55",
+        "opt53": "1 DISCOVER"
+       },
+       "say": "还没有地址，源 IP 只能是 0.0.0.0，只能朝全网喊。",
+       "sub": "chaddr 是服务器记地址的唯一依据。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "OFFER",
+       "hl": [
+        "op",
+        "yiaddr",
+        "xid",
+        "options"
+       ],
+       "vals": {
+        "op": "2 BOOTREPLY",
+        "yiaddr": "192.168.0.100",
+        "xid": "0x3d1e2f4a（原样回）"
+       },
+       "say": "服务器挑一个地址放进 yiaddr，用同一个 xid 表示“这是给你的”。",
+       "sub": "几台服务器都会发，客户端可能收到好几个。"
+      },
+      {
+       "who": "客户端",
+       "to": "广播",
+       "pkt": 0,
+       "bubble": "REQUEST",
+       "hl": [
+        "opt53",
+        "opt61",
+        "chaddr"
+       ],
+       "vals": {
+        "opt53": "3 REQUEST",
+        "opt61": "01 00 11 22 33 44 55"
+       },
+       "say": "广播说“我要这个”，让没被选中的服务器收回各自提议。",
+       "sub": "这条广播连攻击者的耳朵也一起喂了。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 2,
+       "bubble": "ACK 四参数",
+       "hl": [
+        "opt51-val",
+        "opt01-val",
+        "opt03-val",
+        "opt06-val"
+       ],
+       "vals": {
+        "opt51-val": "3600 秒（T1=1800、T2=3150）",
+        "opt01-val": "255.255.255.0",
+        "opt03-val": "192.168.0.254",
+        "opt06-val": "192.168.0.253"
+       },
+       "say": "租期与掩码、网关、DNS 一起下发，客户端这才配好四样东西。",
+       "sub": "全部信任，无一验证。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "T1 续租",
+       "hl": [
+        "xid",
+        "secs",
+        "ciaddr",
+        "opt53"
+       ],
+       "vals": {
+        "xid": "新一轮新值",
+        "secs": "1800（= T1）",
+        "ciaddr": "192.168.0.100",
+        "opt53": "3 REQUEST"
+       },
+       "say": "到租期一半单播回原服务器续租；没回应就在 87.5% 时改广播。",
+       "sub": "计时器保证错误配置最迟一个租期自愈。"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "抢答的把网关指给自己；刷 MAC 的把地址池吃空",
+   "lead": "两个场景各打一面：仿冒打的是“谁先答”，饥饿打的是“地址有限”。",
+   "scenes": [
+    {
+     "name": "仿冒 DHCP 服务器",
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo dhclient -v -r eth0 && sudo dhclient -v eth0",
+        "n": "释放再申请，最容易撞上仿冒服务器",
+        "s": "补充（vault 无 dhclient，DHCP 客户端调试必备）"
+       },
+       {
+        "c": "sudo tcpdump -ni eth0 -vv 'udp port 67 or udp port 68'",
+        "n": "看同一个 xid 有几个 OFFER，源 IP 分别是谁",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       },
+       {
+        "c": "ip route show default",
+        "n": "默认网关是否被改成陌生地址",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPConfiguration | Select-Object InterfaceAlias,IPv4Address,IPv4DefaultGateway",
+        "n": "网关被改一眼可见",
+        "s": "补充（vault 未收录 Get-NetIPConfiguration）"
+       },
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv4",
+        "n": "对比地址与掩码是否落在预期网段",
+        "s": "《系统》PowerShell.md · Get-NetIPAddress"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "ipconfig /all",
+        "n": "DHCP 服务器一栏若不是预期设备，就是仿冒",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       },
+       {
+        "c": "netsh interface ip show config",
+        "n": "网关与 DNS 逐项与基线比对",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "广播",
+       "pkt": 0,
+       "bubble": "DISCOVER",
+       "hl": [
+        "op",
+        "xid",
+        "chaddr"
+       ],
+       "vals": {
+        "op": "1 BOOTREQUEST",
+        "xid": "0x3d1e2f4a"
+       },
+       "say": "开机广播一次，谁先答谁赢——协议里没有“服务器身份”这一说。",
+       "sub": "身份真空期就是攻击窗口。"
+      },
+      {
+       "who": "攻击者",
+       "to": "客户端",
+       "pkt": 1,
+       "evil": true,
+       "bubble": "抢先 OFFER",
+       "hl": [
+        "op",
+        "yiaddr",
+        "siaddr",
+        "options"
+       ],
+       "vals": {
+        "op": "2 BOOTREPLY",
+        "yiaddr": "192.168.0.66",
+        "siaddr": "192.168.0.66",
+        "options": "53=2 OFFER，54=192.168.0.66"
+       },
+       "say": "攻击者抢在合法服务器之前回 OFFER，把自己写成服务器标识。",
+       "sub": "xid 对得上，客户端就认。"
+      },
+      {
+       "who": "客户端",
+       "to": "广播",
+       "pkt": 0,
+       "bubble": "REQUEST",
+       "hl": [
+        "opt53",
+        "chaddr"
+       ],
+       "vals": {
+        "opt53": "3 REQUEST",
+        "chaddr": "00:11:22:33:44:55"
+       },
+       "say": "客户端接受这个提议并广播确认，合法服务器的 OFFER 被丢弃。",
+       "sub": "它只比快慢，不比真假。"
+      },
+      {
+       "who": "攻击者",
+       "to": "客户端",
+       "pkt": 2,
+       "evil": true,
+       "bubble": "假四参数",
+       "hl": [
+        "opt51-val",
+        "opt03-val",
+        "opt06-val"
+       ],
+       "vals": {
+        "opt51-val": "86400（租期拉长，劫持更久）",
+        "opt03-val": "192.168.0.66（网关＝攻击者）",
+        "opt06-val": "192.168.0.66（DNS 也归他）"
+       },
+       "say": "ACK 里把网关和 DNS 都指给自己，租期还拉长到一天。",
+       "sub": "配错地址直接升级为全面中间人。"
+      },
+      {
+       "who": "受害者",
+       "to": "攻击者（被当作网关）",
+       "pkt": 1,
+       "bubble": "全部流量过境",
+       "hl": [
+        "yiaddr",
+        "giaddr",
+        "options"
+       ],
+       "vals": {
+        "yiaddr": "192.168.0.66",
+        "options": "opt3/opt6 均指向 192.168.0.66"
+       },
+       "say": "此后出网流量与域名查询先到 192.168.0.66，明文凭据随手可捡。",
+       "sub": "用户侧只觉慢，偶有证书告警。"
+      }
+     ]
+    },
+    {
+     "name": "地址耗尽（饥饿攻击）",
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo nmap --script broadcast-dhcp-discover",
+        "n": "广播探一次，看还有没有服务器肯给地址",
+        "s": "补充（vault 无 nmap，DHCP 探测脚本）"
+       },
+       {
+        "c": "sudo dhclient -v eth0",
+        "n": "饥饿期间客户端一直 DISCOVER，拿不到 OFFER",
+        "s": "补充（vault 无 dhclient，DHCP 客户端调试必备）"
+       },
+       {
+        "c": "sudo tcpdump -ni eth0 -vv 'udp port 67' | grep -c 'DHCP-Discover'",
+        "n": "统计 DISCOVER 数量与不同 MAC",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv4 | Measure-Object | Select-Object Count",
+        "n": "拿不到地址时只剩回环与自动专用地址",
+        "s": "《系统》PowerShell.md · Get-NetIPAddress"
+       },
+       {
+        "c": "Get-NetAdapter | Select-Object Name,Status,LinkSpeed",
+        "n": "链路 Up 但没地址，正是饥饿的表现",
+        "s": "补充（vault 未收录 Get-NetAdapter）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "ipconfig /all",
+        "n": "出现 169.254.x.x 自动专用地址即 DHCP 失败",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       },
+       {
+        "c": "ipconfig /release && ipconfig /renew",
+        "n": "手动重试，观察是否仍然超时",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "伪造 chaddr",
+       "hl": [
+        "chaddr",
+        "opt61",
+        "opt53"
+       ],
+       "vals": {
+        "chaddr": "02:00:00:00:00:01（伪造）",
+        "opt61": "01 02 00 00 00 00 01",
+        "opt53": "1 DISCOVER"
+       },
+       "say": "每轮换一个假 MAC 发 DISCOVER，服务器就认为来了台新机器。",
+       "sub": "地址按 MAC 记，换 MAC 等于换人。"
+      },
+      {
+       "who": "服务器",
+       "to": "攻击者",
+       "pkt": 1,
+       "bubble": "OFFER 新地址",
+       "hl": [
+        "yiaddr",
+        "chaddr",
+        "options"
+       ],
+       "vals": {
+        "yiaddr": "192.168.0.101",
+        "chaddr": "02:00:00:00:00:01"
+       },
+       "say": "服务器从池子里再切一个地址出来，池水位降一格。",
+       "sub": "它没有任何理由怀疑这个 MAC。"
+      },
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "REQUEST 占住",
+       "hl": [
+        "opt53",
+        "chaddr",
+        "xid"
+       ],
+       "vals": {
+        "opt53": "3 REQUEST",
+        "chaddr": "02:00:00:00:00:01",
+        "xid": "每轮新值"
+       },
+       "say": "发 REQUEST 走完流程，这个地址就被真正绑定，不再释放。",
+       "sub": "只发 DISCOVER 不请求，池子还能回收。"
+      },
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 2,
+       "evil": true,
+       "bubble": "循环数千次",
+       "hl": [
+        "opt54-val",
+        "opt51-val"
+       ],
+       "vals": {
+        "opt54-val": "合法服务器（它并不知情）",
+        "opt51-val": "3600 秒 × 上千条"
+       },
+       "say": "换 MAC 重复几千轮，几百个地址的池子几分钟见底。",
+       "sub": "成本只是一条脚本。"
+      },
+      {
+       "who": "合法客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "DISCOVER 无应答",
+       "hl": [
+        "opt53",
+        "ciaddr",
+        "secs"
+       ],
+       "vals": {
+        "opt53": "1 DISCOVER",
+        "ciaddr": "0.0.0.0（仍然没有地址）",
+        "secs": "重试计数一路上涨"
+       },
+       "say": "合法主机反复重试也拿不到 OFFER，配置层的拒绝服务成立。",
+       "sub": "网线插着，却上不了网。"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "把“配置阶段的事实”固化成绑定表，运行期一律对账",
+   "lead": "两条攻击重放：伪造 chaddr 被比对掉，仿冒应答被端口信任划分挡在交换机上。",
+   "scenes": [
+    {
+     "name": "DHCP Snooping + 端口信任 + DAI",
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni eth0 -vv 'udp port 67 or udp port 68'",
+        "n": "Snooping 生效后，伪造 OFFER 一个都抓不到",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       },
+       {
+        "c": "ip neigh show",
+        "n": "DAI 生效后，网关的 MAC 不会突然变成陌生地址",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "sudo dhclient -v eth0",
+        "n": "正常客户端仍能一轮拿全四参数，说明放行没误伤",
+        "s": "补充（vault 无 dhclient，DHCP 客户端调试必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPConfiguration -Detailed",
+        "n": "网关、DNS、DHCP 服务器三项是否符合基线",
+        "s": "补充（vault 未收录 Get-NetIPConfiguration）"
+       },
+       {
+        "c": "Get-NetNeighbor -AddressFamily IPv4 | Where-Object State -ne 'Unreachable'",
+        "n": "ARP 邻居表，看网关 MAC 有没有漂移",
+        "s": "《系统》PowerShell.md · Get-NetNeighbor"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "arp -a",
+        "n": "网关 IP 对应的 MAC 是否固定",
+        "s": "《系统》Windows CMD.md · arp"
+       },
+       {
+        "c": "netsh interface ip show config",
+        "n": "复核最终配置是否来自可信服务器",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "交换机（Snooping）",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "chaddr 比对",
+       "hl": [
+        "chaddr",
+        "opt61",
+        "opt53"
+       ],
+       "vals": {
+        "chaddr": "02:00:00:00:00:02 ≠ 帧源 MAC",
+        "opt61": "01 02 00 00 00 00 02",
+        "opt53": "1 DISCOVER → 丢弃"
+       },
+       "say": "Snooping 比对 chaddr 与数据帧源 MAC，不一致直接丢包。",
+       "sub": "伪造上千个 MAC，得有上千张真网卡。"
+      },
+      {
+       "who": "攻击者",
+       "to": "交换机",
+       "pkt": 1,
+       "evil": true,
+       "bubble": "非信任端口",
+       "hl": [
+        "op",
+        "yiaddr",
+        "options"
+       ],
+       "vals": {
+        "op": "2 BOOTREPLY（终端不该发应答）",
+        "yiaddr": "192.168.0.66"
+       },
+       "say": "终端口只许发请求，从非信任端口来的 DHCP 应答一律丢弃。",
+       "sub": "仿冒服务器连应答都出不了端口。"
+      },
+      {
+       "who": "交换机（信任端口）",
+       "to": "合法服务器",
+       "pkt": 2,
+       "bubble": "只放行信任端口",
+       "hl": [
+        "opt54-val",
+        "opt51-val",
+        "opt03-val"
+       ],
+       "vals": {
+        "opt54-val": "192.168.0.1（已登记）",
+        "opt51-val": "3600 秒",
+        "opt03-val": "192.168.0.254"
+       },
+       "say": "只有连合法服务器的信任端口才能下发 ACK，配置来源被限定。",
+       "sub": "谁能说“服务器的话”，由端口决定。"
+      },
+      {
+       "who": "交换机（绑定表）",
+       "to": "自身",
+       "pkt": 2,
+       "bubble": "记录事实",
+       "hl": [
+        "opt01-val",
+        "opt03-val",
+        "opt06-val"
+       ],
+       "vals": {
+        "opt01-val": "255.255.255.0",
+        "opt03-val": "192.168.0.254",
+        "opt06-val": "192.168.0.253"
+       },
+       "say": "把 IP—MAC—端口—VLAN 记成绑定表，配置阶段的事实被固化。",
+       "sub": "运行期的任何声明都要与它对账。"
+      },
+      {
+       "who": "交换机（DAI）",
+       "to": "受害者",
+       "pkt": 1,
+       "bubble": "ARP 对账",
+       "hl": [
+        "yiaddr",
+        "chaddr",
+        "giaddr"
+       ],
+       "vals": {
+        "yiaddr": "192.168.0.100（表里属于另一 MAC）",
+        "chaddr": "02:00:…（与表不符）"
+       },
+       "say": "声称拥有某地址的 ARP 与绑定表不符就被丢弃，中间人断链。",
+       "sub": "配置层与运行层共用同一张事实表。"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

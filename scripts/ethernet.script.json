@@ -1,0 +1,547 @@
+{
+ "id": "ethernet",
+ "notes": {
+  "Preamble + SFD": {
+   "short": "8B 前导码，用来定界",
+   "more": "7 个 0x55 让收发时钟对齐，末字节 0xD5 的末尾 11 表示下一比特就是目的地址第一位。它不参与 FCS，也不计入 64~1518 的帧长。",
+   "sec": "定界靠物理层电平，能在链路上注入信号的人就能自己造帧头。"
+  },
+  "Frame Check Sequence": {
+   "short": "CRC-32，只检错不防改",
+   "more": "覆盖目的地址到填充末尾共 60 字节，小端存放。无密钥，任何改动重算 CRC 即可通过，所以主动篡改的工具都会顺手重算它。",
+   "sec": "把 FCS 当完整性保护是常见误判，它只挡随机误码。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "学源、查目的、查不到就泛洪：一台交换机的全部智能就在这里",
+   "lead": "先看空表交换机转发第一帧。三个动作决定一切：按源地址学、按目的地址查、查不到就泛洪。",
+   "scenes": [
+    {
+     "name": "自学习：学源、查目的、查不到就泛洪",
+     "steps": [
+      {
+       "who": "主机 A",
+       "to": "交换机 S1",
+       "pkt": 0,
+       "bubble": "帧 A→B",
+       "hl": [
+        "Destination Address",
+        "Source Address",
+        "Type"
+       ],
+       "vals": {
+        "Destination Address": "00:1a:2b:3c:4d:5e（B，表里查不到）",
+        "Source Address": "00:0c:29:11:22:33（A）",
+        "Type": "0x0800 = IPv4"
+       },
+       "say": "A 发出第一个帧，交换机在空表里查不到目的地址 B。",
+       "sub": "只能先拿源地址学一条表项，再做下一步。"
+      },
+      {
+       "who": "交换机 S1",
+       "to": "主机 B / C / D",
+       "pkt": 0,
+       "bubble": "泛洪",
+       "hl": [
+        "Destination Address"
+       ],
+       "vals": {
+        "Destination Address": "00:1a:2b:3c:4d:5e（查不到 → 除入口外全部复制）"
+       },
+       "say": "查不到目的地址，就把帧复制给除入口外的每个端口。",
+       "sub": "C 和 D 收到后丢弃，只有 B 认领这个目的地址。"
+      },
+      {
+       "who": "交换机 S1",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "写表",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "00:0c:29:11:22:33 → Gi0/1，老化 300 秒"
+       },
+       "say": "表项就是「源 MAC → 进入的端口」，没有任何验证。",
+       "sub": "谁发帧谁就能声明自己占哪条线，这是全部弱点。"
+      },
+      {
+       "who": "主机 B",
+       "to": "交换机 S1",
+       "pkt": 0,
+       "bubble": "帧 B→A",
+       "hl": [
+        "Destination Address",
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "00:1a:2b:3c:4d:5e（B）",
+        "Destination Address": "00:0c:29:11:22:33（A）"
+       },
+       "say": "B 回帧：交换机先学 (B, Gi0/3)，再查目的地址 A。",
+       "sub": "表里已有 A 在 1 口，于是不再泛洪。"
+      },
+      {
+       "who": "交换机 S1",
+       "to": "主机 A",
+       "pkt": 0,
+       "bubble": "单播转发",
+       "hl": [
+        "Destination Address"
+       ],
+       "vals": {
+        "Destination Address": "00:0c:29:11:22:33（命中 1 口）"
+       },
+       "say": "这一帧只从 1 口发出，其余端口完全看不到。",
+       "sub": "表准就是交换机，表不准就是 hub——这就是攻击目标。"
+      },
+      {
+       "who": "交换机 S1",
+       "to": "所有端口",
+       "pkt": 1,
+       "bubble": "BPDU 泛出",
+       "hl": [
+        "Destination Address",
+        "Length",
+        "BPDU Type"
+       ],
+       "vals": {
+        "Destination Address": "01:80:c2:00:00:00（桥接组播，不过滤）",
+        "Length": "0x0026 = 38（小于 0x0600 就按长度解释）",
+        "BPDU Type": "0x00 配置 BPDU"
+       },
+       "say": "STP 的 BPDU 用组播地址发出，交换机把它送进所有端口。",
+       "sub": "第三字段小于 0x0600 是长度而非类型，两种帧同线共存。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ip -s link",
+        "n": "每块网卡的 RX/TX 包数与 errors/dropped，先确认链路真在收发",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "ip neigh show",
+        "n": "本机的 IP→MAC 邻居表，就是终端这一侧的「CAM 表」",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "sudo tcpdump -eni any -c 5",
+        "n": "-e 打出源/目的 MAC，五行就能看出这段线在跑什么帧",
+        "s": "补充（vault 无 tcpdump，看帧头必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetAdapter | Format-Table Name,InterfaceDescription,MacAddress,Status",
+        "n": "每块网卡的 MAC 与速率，对照帧里的源/目的地址",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetNeighbor -AddressFamily IPv4 | Format-Table IPAddress,LinkLayerAddress,State",
+        "n": "IPv4 邻居表，等价 arp -a 但多一个 State",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "getmac /v",
+        "n": "一行一块网卡：连接名、网卡型号、物理地址",
+        "s": "补充（Windows 自带，vault 未收录）"
+       },
+       {
+        "c": "arp -a",
+        "n": "ARP 缓存里 IP 与 MAC 的对应，重点看网关那条",
+        "s": "《系统》Windows CMD.md · arp"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "把表灌满，交换机退回 hub；再改写一条表项，从「看得见」变成「改得了」",
+   "lead": "两个攻击打的其实是同一件事：源地址不可验证。一个拿它打容量，一个拿它打映射。",
+   "scenes": [
+    {
+     "name": "MAC 泛洪：把 CAM 表灌满",
+     "steps": [
+      {
+       "who": "攻击者 A",
+       "to": "交换机 S1",
+       "pkt": 0,
+       "bubble": "随机 SA ×N",
+       "hl": [
+        "Source Address",
+        "Data + Pad"
+       ],
+       "vals": {
+        "Source Address": "每帧换一个随机 MAC（02:xx:xx:xx:xx:xx）",
+        "Data + Pad": "垃圾载荷，只为把帧长凑到 64 字节"
+       },
+       "say": "每秒上千帧，源地址每帧都换，交换机逐条照着学。",
+       "sub": "表是硬件 CAM，条目数固定，常见 8K~16K。",
+       "evil": true
+      },
+      {
+       "who": "交换机 S1",
+       "to": "攻击者 A",
+       "pkt": 0,
+       "bubble": "写满表项",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "随机 MAC_n → Gi0/24，表占用已近上限"
+       },
+       "say": "每个假源地址都占一条表项，用量一路涨到硬件上限。",
+       "sub": "合法主机的表项被挤掉，或者被老化掉。"
+      },
+      {
+       "who": "主机 C",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "查不到 → 泛洪",
+       "hl": [
+        "Destination Address"
+       ],
+       "vals": {
+        "Destination Address": "00:1a:2b:3c:4d:5e（表满，查不到）"
+       },
+       "say": "正常主机发的帧也查不到了，按规则必须泛洪到所有端口。",
+       "sub": "交换机退化成 hub，攻击者口自然收到一份。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "收下明文",
+       "hl": [
+        "Data + Pad"
+       ],
+       "vals": {
+        "Data + Pad": "别人的 FTP/SMTP 会话内容，全部明文"
+       },
+       "say": "混杂模式下把泛洪来的帧全收下，会话内容直接可读。",
+       "sub": "FTP、SMTP、Telnet 的用户名口令都在这里。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "交换机 S1",
+       "pkt": 0,
+       "bubble": "持续灌注",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "继续换 MAC，随时补上空出来的位置"
+       },
+       "say": "表一有老化腾位就立刻补满，让「查不到」变成常态。",
+       "sub": "泛洪帧本身也在挤带宽和交换机 CPU。",
+       "evil": true
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ip -s link show eth0",
+        "n": "盯 RX 包数与 errors：泛洪时包数暴涨、errors 跟着上升",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "sudo tcpdump -eni eth0 -c 20 'ether src not 00:0c:29:11:22:33'",
+        "n": "20 个非本机源 MAC 的帧——正常几乎为空，泛洪时刷屏",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo bridge fdb show | wc -l",
+        "n": "Linux 网桥的 FDB 条数，等价交换机的 CAM 表用量",
+        "s": "补充（bridge 命令，vault 未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetAdapterStatistics | Format-Table Name,ReceivedUnicastPackets,ReceivedBroadcastPackets",
+        "n": "收包统计：泛洪时非单播包与非本机包明显增多",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "(Get-NetNeighbor).Count",
+        "n": "邻居表条数，异常增多说明这一段有大量伪造 MAC 在活动",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -e",
+        "n": "以太网统计：单播/非单播包数与错误数，泛洪时非单播暴涨",
+        "s": "《系统》Windows CMD.md · netstat"
+       },
+       {
+        "c": "arp -a",
+        "n": "ARP 表里冒出大量陌生 MAC 或同一 IP 多个 MAC，就是泛洪加投毒的痕迹",
+        "s": "《系统》Windows CMD.md · arp"
+       }
+      ]
+     }
+    },
+    {
+     "name": "MAC 欺骗 + ARP 投毒：从嗅探升级成中间人",
+     "steps": [
+      {
+       "who": "攻击者 A",
+       "to": "受害者 B",
+       "pkt": 0,
+       "bubble": "伪造 SA=网关",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "网关的 MAC（攻击者自行填写）"
+       },
+       "say": "把源地址改成网关的 MAC，再配一条「网关 IP 是我」的 ARP 应答。",
+       "sub": "ARP 应答无需请求就能被接受，缓存直接覆盖。",
+       "evil": true
+      },
+      {
+       "who": "交换机 S1",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "表项被改写",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "网关 MAC → Gi0/24（原来在 Gi0/1）"
+       },
+       "say": "交换机只按源地址学习：网关的 MAC 现在记在攻击者口上。",
+       "sub": "真网关从此收不到上行帧，直到表项被刷新。"
+      },
+      {
+       "who": "受害者 B",
+       "to": "网关",
+       "pkt": 0,
+       "bubble": "帧走错口",
+       "hl": [
+        "Destination Address"
+       ],
+       "vals": {
+        "Destination Address": "网关 MAC（表里指向攻击者口）"
+       },
+       "say": "B 发往网关的帧被送到攻击者口，而不是真网关。",
+       "sub": "攻击者看到全部上行流量，还能改了再转发。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "网关（真）",
+       "pkt": 0,
+       "bubble": "转手重放",
+       "hl": [
+        "Data + Pad"
+       ],
+       "vals": {
+        "Data + Pad": "原样或改写后转发给真网关"
+       },
+       "say": "攻击者把帧改完再发给真网关，双方通信照常，用户无感。",
+       "sub": "无加密时这是完整中间人；有 TLS 就只剩流量元数据。",
+       "evil": true
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ip neigh show 192.168.1.1",
+        "n": "网关的 MAC 变成攻击者就是投毒成功，正常应与交换机侧一致",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "sudo tcpdump -eni eth0 'arp' -c 10",
+        "n": "抓 ARP：同一 IP 反复宣告不同 MAC，就是投毒在刷缓存",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo arping -I eth0 -c 3 192.168.1.1",
+        "n": "主动探测网关：回应 MAC 与缓存里不一致说明被冒充",
+        "s": "补充（iputils-arping，vault 未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetNeighbor -AddressFamily IPv4 | Where-Object IPAddress -eq 192.168.1.1 | Format-List IPAddress,LinkLayerAddress,State",
+        "n": "单看网关那一条：MAC 还是不是真网关",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetAdapter | Format-Table Name,Status,LinkSpeed",
+        "n": "网卡状态正常但流量异常，就是二层被改写而非链路故障",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "arp -a 192.168.1.1",
+        "n": "网关 IP 对应的物理地址，被投毒时显示攻击者 MAC",
+        "s": "《系统》Windows CMD.md · arp"
+       },
+       {
+        "c": "netsh interface ipv4 show neighbors",
+        "n": "按接口列邻居缓存含 State，便于对比刷新前后",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "限住每个口能学几个 MAC，再用绑定表校验 ARP——泛洪与投毒同时失效",
+   "lead": "同一场泛洪重放一遍：这次第 11 个 MAC 就进不了表，表稳定则泛洪无收益。",
+   "scenes": [
+    {
+     "name": "端口安全 + DAI：把「查不到」和「改得了」同时堵住",
+     "steps": [
+      {
+       "who": "交换机 S1（接入口）",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "maximum 10 + sticky",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "合法主机 MAC 学满 10 条后封口"
+       },
+       "say": "接入口限定 10 个 MAC，sticky 把合法地址固化，超限即 violation。",
+       "sub": "protect 丢弃 / restrict 告警 / shutdown 关端口。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "交换机 S1",
+       "pkt": 0,
+       "bubble": "第 11 个 MAC",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "随机 MAC（第 11 个）→ 被丢弃，不入表"
+       },
+       "say": "随机源地址到第 11 个就被丢，进不了 CAM 表。",
+       "sub": "表不再被灌满，泛洪的前提消失。",
+       "evil": true
+      },
+      {
+       "who": "主机 C",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "仍是单播",
+       "hl": [
+        "Destination Address"
+       ],
+       "vals": {
+        "Destination Address": "命中表项 → 只从对应口发出"
+       },
+       "say": "表项稳定，正常帧继续按表单播，攻击者口收不到。",
+       "sub": "攻击收益从「全看」变成「看不见」。"
+      },
+      {
+       "who": "交换机 S1",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "DAI 校验",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "ARP 发送方 IP/MAC 与绑定表逐帧比对"
+       },
+       "say": "DAI 拿 DHCP Snooping 的「IP-MAC-端口」表校验每一个 ARP。",
+       "sub": "不一致直接丢弃，投毒的 ARP 应答到不了受害者。"
+      },
+      {
+       "who": "受害者 B",
+       "to": "网关",
+       "pkt": 0,
+       "bubble": "回真网关",
+       "hl": [
+        "Destination Address"
+       ],
+       "vals": {
+        "Destination Address": "网关 MAC 仍在正确的上行口"
+       },
+       "say": "网关 MAC 没被改写，B 的帧照常走上行口到真网关。",
+       "sub": "没有 DHCP Snooping 就没有绑定表，DAI 无从判定。"
+      },
+      {
+       "who": "运维",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "边界别忘",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "上行口只做静态绑定，不开粘滞学习"
+       },
+       "say": "上行口和级联口若也开粘滞，一次误封就是整段掉线。",
+       "sub": "配 errdisable recovery，防止被故意打成 DoS。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo bridge fdb show br0 | awk '{print $3}' | sort | uniq -c | sort -rn | head",
+        "n": "哪个端口学到的 MAC 最多：单口上千条就是泛洪，正常应个位数",
+        "s": "补充（bridge 命令，vault 未收录）"
+       },
+       {
+        "c": "sudo bridge fdb show dev eth1 | wc -l",
+        "n": "单口 MAC 条数——端口安全的 maximum 在 Linux 网桥上的等价检查",
+        "s": "补充（bridge 命令，vault 未收录）"
+       },
+       {
+        "c": "ip neigh show | grep -c lladdr",
+        "n": "邻居表条数，投毒后常见同一 MAC 对应多个 IP",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetNeighbor -State Reachable | Format-Table IPAddress,LinkLayerAddress",
+        "n": "只看可达项，投毒后网关那行的 MAC 会变成攻击者",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetAdapterStatistics | Format-Table Name,ReceivedBroadcastPackets",
+        "n": "防护后复测：非单播收包不再随攻击增长",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh interface ipv4 show neighbors",
+        "n": "复核网关 MAC 是否已恢复为真实设备",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "arp -a",
+        "n": "先 arp -d * 清缓存再看，能区分「缓存旧值」与「真被改」",
+        "s": "《系统》Windows CMD.md · arp"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

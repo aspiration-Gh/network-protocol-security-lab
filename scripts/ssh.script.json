@@ -1,0 +1,560 @@
+{
+ "id": "ssh",
+ "notes": {
+  "Cookie": {
+   "short": "16 字节随机数，混进密钥推导",
+   "more": "双方各生成一个并互相交换，作为共享秘密 K 与交换哈希 H 的输入之一，使任何一方都无法单独决定会话密钥与 session_id。",
+   "sec": "随机源若可预测，会话密钥就能被预先算出，历史上有过真实的密钥泄露案例。"
+  },
+  "kex_algorithms": {
+   "short": "算法清单，取交集最弱者胜出",
+   "more": "4 字节长度加逗号分隔的算法名，按偏好从高到低排列；协商取客户端列表里第一个服务器也支持的项，因此清单里留着弱算法就会被选中。",
+   "sec": "清单里还有 1024 位群，被动录包者就能靠预计算解密整段会话。"
+  },
+  "Message Code": {
+   "short": "消息号决定分派到哪一层",
+   "more": "传输层 1-49、认证层 50-79、连接层 80 以上；20 是 KEXINIT，50 是认证请求，51 与 52 是失败与成功。",
+   "sec": "协商阶段只许发 1-49 号消息，这条约束挡住明文阶段提前跳进认证流程。"
+  },
+  "Method Name": {
+   "short": "none 探测会回显可用方法",
+   "more": "none 是不带任何凭据的探测，服务器必定回 51，并在列表里给出真正支持的方法：publickey、password、keyboard-interactive。",
+   "sec": "回显的方法列表直接告诉攻击者该爆破口令还是该去找私钥。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "版本、算法、密钥、认证：一条越来越窄的信任链",
+   "lead": "先看正常流程。注意顺序：信道先加密，用户才在里面认证——这是它比 FTP 安全的根本原因。",
+   "scenes": [
+    {
+     "name": "五个阶段走一遍",
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "SSH-2.0-OpenSSH_9.6",
+       "hl": [
+        "Proto Name",
+        "Proto Version",
+        "Software Version"
+       ],
+       "vals": {
+        "Proto Name": "SSH-",
+        "Proto Version": "2.0",
+        "Software Version": "OpenSSH_9.6"
+       },
+       "say": "TCP 建连后双方各发一行明文标识串，它决定后面能谈什么。",
+       "sub": "最长 255 字节，以单个 CRLF 结束。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "SSH-2.0-...",
+       "hl": [
+        "Proto Version",
+        "CRLF"
+       ],
+       "vals": {
+        "Proto Version": "2.0",
+        "CRLF": "0D 0A"
+       },
+       "say": "服务器回自己的版本行；这一行可被中间人改，但改不出冒充。",
+       "sub": "紧接着的密钥交换会把双方身份绑进交换哈希。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "KEXINIT（20）",
+       "hl": [
+        "Message Code",
+        "kex_algorithms",
+        "server_host_key_algorithms"
+       ],
+       "vals": {
+        "Message Code": "20",
+        "kex_algorithms": "curve25519-sha256",
+        "server_host_key_algorithms": "ssh-ed25519,rsa-sha2-512"
+       },
+       "say": "16 字节 cookie 加 10 张名字列表，各报清单再取交集。",
+       "sub": "规则是客户端偏好优先：第一个服务器也支持的胜出。"
+      },
+      {
+       "who": "双方",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "X25519 密钥交换",
+       "hl": [
+        "Cookie",
+        "encryption_algorithms_c2s"
+       ],
+       "vals": {
+        "Cookie": "随机 16 字节",
+        "encryption_algorithms_c2s": "aes128-ctr"
+       },
+       "say": "交换值算出共享秘密 K 与交换哈希 H，两个方向的密钥由此派生。",
+       "sub": "cookie 让任何一方都无法单独决定会话密钥。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 2,
+       "bubble": "USERAUTH（50）",
+       "hl": [
+        "Message Code",
+        "User Name",
+        "Method Name"
+       ],
+       "vals": {
+        "Message Code": "50",
+        "User Name": "root",
+        "Method Name": "none"
+       },
+       "say": "此时信道已加密，认证请求才发出来；none 只是探测可用方法。",
+       "sub": "none 必定失败，服务器回 51 并列出真正支持的方法。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 2,
+       "bubble": "52 SUCCESS",
+       "hl": [
+        "Message Code",
+        "Service Name"
+       ],
+       "vals": {
+        "Message Code": "52",
+        "Service Name": "ssh-connection"
+       },
+       "say": "认证通过后进入连接协议，shell 与端口转发都在同一条加密信道里。",
+       "sub": "主机密钥证明连对了机器，用户密钥证明登对了人。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ssh -v user@192.0.2.10",
+        "n": "-v 把版本交换、KEXINIT、选中的算法与认证方法逐条打出来",
+        "s": "《系统》Linux.md · 8. Linux 远程登录"
+       },
+       {
+        "c": "ssh -Q kex",
+        "n": "列出本机支持的密钥交换算法，清单里留着的弱项就是隐患",
+        "s": "补充（OpenSSH -Q 查询）"
+       },
+       {
+        "c": "ss -tnie '( dport = :22 )'",
+        "n": "看 SSH 连接的收发队列；加密后流量长度趋于均匀",
+        "s": "补充（ss 套接字统计，仓库未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection 192.0.2.10 -Port 22",
+        "n": "测 22 端口可达性，通了才开始版本交换",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -an | findstr :22",
+        "n": "看本机 22 端口的连接与对端地址",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "信任链两端都有缝：首次连接无锚可依，算法清单可被压到最弱",
+   "lead": "一个在连接建立前动手，一个全程只录不发。两种打法都不需要破解任何密码。",
+   "scenes": [
+    {
+     "name": "首次连接中间人",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "受害者 A",
+       "pkt": 0,
+       "bubble": "冒充服务器应答",
+       "evil": true,
+       "hl": [
+        "Proto Name",
+        "Proto Version"
+       ],
+       "vals": {
+        "Proto Name": "SSH-",
+        "Proto Version": "2.0"
+       },
+       "say": "先 ARP 把网关绑到自己网卡，再以服务器身份回一行版本串。",
+       "sub": "版本行是明文，改它不会被立刻发现。"
+      },
+      {
+       "who": "受害者 A",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "SSH-2.0-OpenSSH_9.6",
+       "hl": [
+        "Software Version"
+       ],
+       "vals": {
+        "Software Version": "OpenSSH_9.6"
+       },
+       "say": "A 照常回自己的版本串，它并不知道对面是谁。",
+       "sub": "两条独立连接各自握手，中间各算一次密钥。"
+      },
+      {
+       "who": "攻击者",
+       "to": "真实服务器 B",
+       "pkt": 1,
+       "bubble": "另起一条会话",
+       "evil": true,
+       "hl": [
+        "kex_algorithms",
+        "Message Code"
+       ],
+       "vals": {
+        "kex_algorithms": "curve25519-sha256",
+        "Message Code": "20"
+       },
+       "say": "对 B 跑完一整套 KEXINIT 与密钥交换，手里握着两条会话的密钥。",
+       "sub": "于是可以逐包解密，改完再加密转发。"
+      },
+      {
+       "who": "受害者 A",
+       "to": "本地终端",
+       "pkt": 0,
+       "bubble": "继续连接？(yes/no)",
+       "hl": [
+        "Proto Name"
+       ],
+       "vals": {
+        "Proto Name": "known_hosts 无记录"
+       },
+       "say": "首次连接没有可比对的记录，用户习惯性敲 yes。",
+       "sub": "攻击者的主机公钥就这样写进了信任库。"
+      },
+      {
+       "who": "攻击者",
+       "to": "受害者 A",
+       "pkt": 2,
+       "bubble": "USERAUTH 明文可见",
+       "evil": true,
+       "hl": [
+        "User Name",
+        "Method Name"
+       ],
+       "vals": {
+        "User Name": "root",
+        "Method Name": "password"
+       },
+       "say": "解密后拿到口令；即使用公钥，也能借用已认证的会话。",
+       "sub": "日志里只有一次正常登录，双方界面毫无异常。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni eth0 -A 'tcp port 22'",
+        "n": "抓到的只有两行 SSH-2.0 明文版本串，其余全是密文",
+        "s": "补充（tcpdump，仓库未收录）"
+       },
+       {
+        "c": "ssh-keyscan -t ed25519 192.0.2.10",
+        "n": "取对端主机公钥，与资产库里的指纹逐字节比对",
+        "s": "补充（ssh-keyscan，OpenSSH 自带）"
+       },
+       {
+        "c": "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub",
+        "n": "在服务器侧算主机密钥指纹，用于带外核对",
+        "s": "补充（ssh-keygen -l 打印指纹）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "ssh -o StrictHostKeyChecking=yes user@192.0.2.10",
+        "n": "强制校验 known_hosts，密钥不匹配直接断开而不是提示",
+        "s": "补充（OpenSSH 客户端选项）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "arp -a",
+        "n": "看网关 IP 对应的 MAC 是否被换成了别的网卡，这是中间人第一步",
+        "s": "《系统》Windows CMD.md · arp"
+       }
+      ]
+     }
+    },
+    {
+     "name": "弱 DH 降级与预计算",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "链路",
+       "pkt": 1,
+       "bubble": "被动录包",
+       "evil": true,
+       "hl": [
+        "kex_algorithms",
+        "Cookie"
+       ],
+       "vals": {
+        "kex_algorithms": "原样保存",
+        "Cookie": "原样保存"
+       },
+       "say": "不改包不注入，只把 KEXINIT 与 KEX 报文整段存下来。",
+       "sub": "没有注入，因此不会触发任何告警。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "取交集落到最弱",
+       "hl": [
+        "kex_algorithms",
+        "server_host_key_algorithms"
+       ],
+       "vals": {
+        "kex_algorithms": "...,diffie-hellman-group1-sha1",
+        "server_host_key_algorithms": "...,ssh-rsa"
+       },
+       "say": "两边清单里都还留着 1024 位群与 SHA-1 签名，交集把它们挑了出来。",
+       "sub": "客户端偏好优先，弱项排在前面就直接胜出。"
+      },
+      {
+       "who": "攻击者",
+       "to": "离线算力",
+       "pkt": 1,
+       "bubble": "预计算离散对数表",
+       "evil": true,
+       "hl": [
+        "kex_algorithms"
+       ],
+       "vals": {
+        "kex_algorithms": "group1 预计算表"
+       },
+       "say": "对同一个 1024 位群做一次大规模预计算，之后所有会话复用。",
+       "sub": "成本集中付一次，收益按会话数摊薄。"
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "求出共享秘密 K",
+       "evil": true,
+       "hl": [
+        "Cookie",
+        "encryption_algorithms_c2s"
+       ],
+       "vals": {
+        "Cookie": "由表反推",
+        "encryption_algorithms_c2s": "aes128-ctr"
+       },
+       "say": "用预计算表从录到的交换值直接解出 K，不需要服务器私钥。",
+       "sub": "前向保密在这里失效，因为群太小。"
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "解密历史流量",
+       "evil": true,
+       "hl": [
+        "mac_algorithms_c2s",
+        "encryption_algorithms_c2s"
+       ],
+       "vals": {
+        "mac_algorithms_c2s": "hmac-sha2-256",
+        "encryption_algorithms_c2s": "aes128-ctr"
+       },
+       "say": "由 K 与 H 推出两个方向的密钥，录下的会话逐包还原。",
+       "sub": "全程离线，受害者永远不会知道自己被解过。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ssh -Q kex | tr ' ' '\\n' | grep -Ei 'group1|group14-sha1'",
+        "n": "在支持清单里找 1024 位群与 SHA-1，有输出就是隐患",
+        "s": "补充（OpenSSH -Q 查询）"
+       },
+       {
+        "c": "ssh -o KexAlgorithms=diffie-hellman-group1-sha1 -v user@192.0.2.10",
+        "n": "显式指定弱算法；能连上说明服务器仍接受，录包即可预计算",
+        "s": "补充（OpenSSH 客户端选项）"
+       },
+       {
+        "c": "ssh -o HostKeyAlgorithms=ssh-rsa -v user@192.0.2.10",
+        "n": "试 SHA-1 签名的主机密钥算法，-v 输出里能看到协商结果",
+        "s": "补充（OpenSSH 客户端选项）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "(Get-Content $HOME\\.ssh\\known_hosts) -match 'ssh-rsa'",
+        "n": "看 known_hosts 里是否还存着 SHA-1 的主机密钥条目",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -an | findstr :22",
+        "n": "确认会话已建立，再决定这条流值不值得录",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "把「第一次连的是谁」交给 CA，把「能谈到多弱」交给白名单",
+   "lead": "两道闸分别管身份与算法，缺一条整条信任链就不成立。",
+   "scenes": [
+    {
+     "name": "主机证书 + 算法白名单",
+     "steps": [
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "主机证书",
+       "hl": [
+        "Proto Version",
+        "Software Version"
+       ],
+       "vals": {
+        "Proto Version": "2.0",
+        "Software Version": "OpenSSH_9.6"
+       },
+       "say": "主机密钥由内部 CA 签发证书，客户端只信任 CA 公钥。",
+       "sub": "轮换主机密钥只需重签，客户端不用改。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "校验证书链",
+       "hl": [
+        "Proto Name"
+       ],
+       "vals": {
+        "Proto Name": "@cert-authority"
+       },
+       "say": "第一次连接就校验证书链，不再盲信对方递过来的公钥。",
+       "sub": "TOFU 的缺口全在首次连接，这里把它补上。"
+      },
+      {
+       "who": "攻击者",
+       "to": "受害者 A",
+       "pkt": 0,
+       "bubble": "冒充失败",
+       "evil": true,
+       "hl": [
+        "Proto Name"
+       ],
+       "vals": {
+        "Proto Name": "SSH- 但证书对不上"
+       },
+       "say": "攻击者仍回同一行版本串，但签发者不在信任列表里。",
+       "sub": "客户端直接断开，不会弹 yes/no。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "只留现代算法",
+       "hl": [
+        "kex_algorithms",
+        "server_host_key_algorithms"
+       ],
+       "vals": {
+        "kex_algorithms": "curve25519-sha256",
+        "server_host_key_algorithms": "ssh-ed25519"
+       },
+       "say": "清单里没有弱项，取交集不可能落到 group1 或裸 rsa-sha。",
+       "sub": "降级的前提是清单里有可降的东西。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 2,
+       "bubble": "只留公钥认证",
+       "hl": [
+        "Method Name",
+        "Message Code"
+       ],
+       "vals": {
+        "Method Name": "publickey",
+        "Message Code": "52"
+       },
+       "say": "口令认证关闭，MaxAuthTries 设 3，爆破连入口都没有。",
+       "sub": "51 号消息里只剩 publickey 一种方法。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "22 只对管理网开",
+       "hl": [
+        "Proto Name"
+       ],
+       "vals": {
+        "Proto Name": "22 → 堡垒机"
+       },
+       "say": "22 端口只对管理网或堡垒机开放，外部访问先入 VPN。",
+       "sub": "边界收敛之后，算法加固才有意义。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo sshd -T | grep -Ei 'kexalgorithms|hostkeyalgorithms|ciphers|macs'",
+        "n": "打印生效配置：确认只剩 curve25519-sha256 与 ssh-ed25519",
+        "s": "补充（sshd -T 打印生效配置）"
+       },
+       {
+        "c": "sudo sshd -T | grep -Ei 'passwordauthentication|maxauthtries|permitrootlogin'",
+        "n": "确认口令认证关闭、MaxAuthTries 3、root 不许直接登录",
+        "s": "补充（sshd -T 打印生效配置）"
+       },
+       {
+        "c": "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key-cert.pub",
+        "n": "查主机证书的签发 CA 与有效期，客户端只信 CA 就不必逐台预置指纹",
+        "s": "补充（ssh-keygen -l 打印证书）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "ssh -o StrictHostKeyChecking=yes -o KexAlgorithms=curve25519-sha256 user@192.0.2.10",
+        "n": "客户端侧同样收紧：弱算法写在命令行里也连不上",
+        "s": "补充（OpenSSH 客户端选项）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall firewall show rule name=all | findstr /i \"22\"",
+        "n": "确认 22 只对管理网段放行，公网没有直接入口",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

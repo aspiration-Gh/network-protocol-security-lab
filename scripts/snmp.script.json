@@ -1,0 +1,552 @@
+{
+ "id": "snmp",
+ "notes": {
+  "community": {
+   "short": "明文共享口令，v1/v2c 唯一凭据",
+   "more": "OCTET STRING，服务器只做字符串比对，相等就执行，不区分是谁、从哪来；读常用 public，写常用 private，都写在出厂配置里。",
+   "sec": "抓包一次就永久获得，默认值几乎是公网资产普查的入场券。"
+  },
+  "max-repetitions": {
+   "short": "放大倍数的直接旋钮",
+   "more": "GetBulk 对每个重复型 varbind 连续返回这么多个后继值，取值越大响应越长，上限由代理与 msgMaxSize 决定。",
+   "sec": "请求侧不变、响应侧涨几十倍，配合伪造源地址就是流量放大器。"
+  },
+  "msgFlags": {
+   "short": "auth/priv 位决定有没有保护",
+   "more": "bit0 认证、bit1 加密、bit2 需要 Report；0x00 与 0x04 都没有认证可以随意伪造，只有 0x03 同时具备完整性与机密性。",
+   "sec": "看这两位就知道报文能不能被伪造，边界设备该按它而不是按版本号放行。"
+  },
+  "msgAuthenticationParameters": {
+   "short": "v3 的完整性靠这 12 字节",
+   "more": "启用认证时填 HMAC-MD5-96 或 HMAC-SHA-96 的前 12 字节：发送方把本字段置零后对整个报文算 HMAC，接收方照做比对。",
+   "sec": "这 12 字节也是攻击者离线猜口令时唯一能拿来自校验的比对值。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "一问一答：一个 SEQ 套着版本、团体名和 PDU",
+   "lead": "全程 UDP，没有握手也没有状态。留意团体名那一行——它决定后面能不能打。",
+   "scenes": [
+    {
+     "name": "查询、应答、批量取",
+     "steps": [
+      {
+       "who": "管理者",
+       "to": "代理",
+       "pkt": 0,
+       "bubble": "GetRequest",
+       "hl": [
+        "msgVersion",
+        "community",
+        "GetRequest-PDU"
+       ],
+       "vals": {
+        "msgVersion": "1（v2c）",
+        "community": "public",
+        "GetRequest-PDU": "0xA0"
+       },
+       "say": "往 161 发一个查询，版本与团体名都明文摊在报文里。",
+       "sub": "整个报文就是一个 ASN.1 SEQUENCE，没有定长首部。"
+      },
+      {
+       "who": "管理者",
+       "to": "代理",
+       "pkt": 0,
+       "bubble": "OID = sysDescr.0",
+       "hl": [
+        "name (OID 1.3.6.1.2.1.1.1.0)",
+        "value (NULL)"
+       ],
+       "vals": {
+        "name (OID 1.3.6.1.2.1.1.1.0)": "1.3.6.1.2.1.1.1.0",
+        "value (NULL)": "NULL"
+       },
+       "say": "问 sysDescr，值留 NULL 占位：查询只问不答。",
+       "sub": "前两段 1.3 压成 0x2b 一个字节。"
+      },
+      {
+       "who": "代理",
+       "to": "管理者",
+       "pkt": 0,
+       "bubble": "Response",
+       "hl": [
+        "request-id",
+        "error-status"
+       ],
+       "vals": {
+        "request-id": "0x12345678 原值回填",
+        "error-status": "0（无错）"
+       },
+       "say": "应答把 request-id 原值带回，客户端靠它把响应与请求配对。",
+       "sub": "这个标识没有任何密码学保护，可以被猜。"
+      },
+      {
+       "who": "管理者",
+       "to": "代理",
+       "pkt": 1,
+       "bubble": "GetBulk",
+       "hl": [
+        "GetBulkRequest-PDU",
+        "non-repeaters",
+        "max-repetitions"
+       ],
+       "vals": {
+        "GetBulkRequest-PDU": "0xA5",
+        "non-repeaters": "0",
+        "max-repetitions": "50"
+       },
+       "say": "GetBulk 一次取 50 个后继值，轮询从 50 次降到 1 次。",
+       "sub": "这是 v2 才有的 PDU，v1 设备收到会丢弃。"
+      },
+      {
+       "who": "代理",
+       "to": "管理者",
+       "pkt": 1,
+       "bubble": "走 ifTable",
+       "hl": [
+        "name (OID 1.3.6.1.2.1.2.2.1)"
+       ],
+       "vals": {
+        "name (OID 1.3.6.1.2.1.2.2.1)": "1.3.6.1.2.1.2.2.1"
+       },
+       "say": "顺着 ifEntry 一路走完，接口、速率、流量计数一次到手。",
+       "sub": "从表入口走比问具体叶子的信息密度高得多。"
+      },
+      {
+       "who": "管理者",
+       "to": "代理",
+       "pkt": 2,
+       "bubble": "v3 引擎发现",
+       "hl": [
+        "msgVersion",
+        "msgFlags",
+        "msgSecurityModel"
+       ],
+       "vals": {
+        "msgVersion": "3",
+        "msgFlags": "0x04",
+        "msgSecurityModel": "3（USM）"
+       },
+       "say": "v3 换了结构：全局首部加安全参数，msgFlags 说明有没有保护。",
+       "sub": "0x03 才是 authPriv，同时有完整性与机密性。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "snmpwalk -v2c -c public 192.0.2.10 1.3.6.1.2.1.1",
+        "n": "走 sys 组，sysDescr、sysName、sysLocation 一次读完",
+        "s": "补充（net-snmp 工具集，仓库未收录）"
+       },
+       {
+        "c": "snmpget -v2c -c public 192.0.2.10 1.3.6.1.2.1.1.1.0",
+        "n": "只取 sysDescr，验证团体名与 OID 都对",
+        "s": "补充（net-snmp 工具集，仓库未收录）"
+       },
+       {
+        "c": "snmpbulkget -v2c -c public -Cn0 -Cr50 192.0.2.10 1.3.6.1.2.1.2.2.1",
+        "n": "-Cr50 一次取 50 个后继值，等价 50 次 GetNext",
+        "s": "补充（net-snmp 工具集，仓库未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetUDPEndpoint -LocalPort 161 -ErrorAction SilentlyContinue",
+        "n": "看本机有没有代理在 161 上监听 UDP",
+        "s": "补充（PowerShell NetTCPIP 模块，仓库未收录）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -an | findstr :161",
+        "n": "UDP 161 显示 *:* 的监听行，说明本机代理在听",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "先猜口令读空设备，再用同一套报文把代理变成放大器",
+   "lead": "同一个 GetBulk，读的时候是效率工具，伪造源地址发出去就是放大器。",
+   "scenes": [
+    {
+     "name": "团体名爆破与 OID 枚举",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "目标网段",
+       "pkt": 0,
+       "bubble": "扫 161/udp",
+       "evil": true,
+       "hl": [
+        "GetRequest-PDU"
+       ],
+       "vals": {
+        "GetRequest-PDU": "0xA0 探测"
+       },
+       "say": "发一个 GetRequest，有 Response 就说明这地址跑着代理。",
+       "sub": "UDP 无连接，扫描成本只有一个包。"
+      },
+      {
+       "who": "攻击者",
+       "to": "代理",
+       "pkt": 0,
+       "bubble": "community=public",
+       "evil": true,
+       "hl": [
+        "community",
+        "name (OID 1.3.6.1.2.1.1.1.0)"
+       ],
+       "vals": {
+        "community": "public",
+        "name (OID 1.3.6.1.2.1.1.1.0)": "sysDescr"
+       },
+       "say": "字典第一个就试出厂默认的只读团体名。",
+       "sub": "只比对字符串，不问是谁、从哪来。"
+      },
+      {
+       "who": "代理",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "命中了",
+       "hl": [
+        "community",
+        "value (NULL)"
+       ],
+       "vals": {
+        "community": "public 有效",
+        "value (NULL)": "Cisco IOS 15.x"
+       },
+       "say": "回包带回厂商与固件版本，等于附赠该打哪个 CVE。",
+       "sub": "错误码差异还能区分实现，便于精准匹配。"
+      },
+      {
+       "who": "攻击者",
+       "to": "代理",
+       "pkt": 1,
+       "bubble": "GetBulk 枚举",
+       "evil": true,
+       "hl": [
+        "max-repetitions",
+        "name (OID 1.3.6.1.2.1.2.2.1)"
+       ],
+       "vals": {
+        "max-repetitions": "50",
+        "name (OID 1.3.6.1.2.1.2.2.1)": "ifEntry 走表"
+       },
+       "say": "接口、速率、路由表、进程表逐表走一遍，拓扑图就有了。",
+       "sub": "全程只读，不需要任何漏洞利用。"
+      },
+      {
+       "who": "攻击者",
+       "to": "代理",
+       "pkt": 1,
+       "bubble": "SetRequest",
+       "evil": true,
+       "hl": [
+        "community",
+        "name (OID 1.3.6.1.2.1.2.2.1)"
+       ],
+       "vals": {
+        "community": "private 命中",
+        "name (OID 1.3.6.1.2.1.2.2.1)": "ifAdminStatus.1 = down"
+       },
+       "say": "写团体名一旦命中就能改配置，关一个口不留痕迹。",
+       "sub": "合法 OID 加合法团体名，日志里看不出异常。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "onesixtyone -c /usr/share/seclists/Discovery/SNMP/common-snmp-community-strings.txt 192.0.2.0/24",
+        "n": "用字典并发试团体名，命中会打出 sysDescr",
+        "s": "补充（onesixtyone 团体名扫描）"
+       },
+       {
+        "c": "snmpwalk -v2c -c private 192.0.2.10 1.3.6.1.2.1.2.2.1",
+        "n": "换写团体名走 ifEntry，能读说明 private 也开着",
+        "s": "补充（net-snmp 工具集，仓库未收录）"
+       },
+       {
+        "c": "snmpset -v2c -c private 192.0.2.10 1.3.6.1.2.1.2.2.1.7.1 i 2",
+        "n": "把 1 号口 ifAdminStatus 置 2（down），链路静默断开",
+        "s": "补充（net-snmp 工具集，仓库未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-Connection 192.0.2.10 -Count 1 -Quiet",
+        "n": "先确认目标在线；UDP 没有 RST，不通不会报错",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -an | findstr :161",
+        "n": "看本机是否也在监听 161，避免自测时打到自己",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    },
+    {
+     "name": "GetBulk 反射放大",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "开放代理",
+       "pkt": 1,
+       "bubble": "src = 受害者",
+       "evil": true,
+       "hl": [
+        "max-repetitions",
+        "non-repeaters"
+       ],
+       "vals": {
+        "max-repetitions": "50",
+        "non-repeaters": "0"
+       },
+       "say": "把源地址伪造成受害者，发一个几十字节的 GetBulk。",
+       "sub": "UDP 没有握手，代理无法回头确认。"
+      },
+      {
+       "who": "开放代理",
+       "to": "受害者",
+       "pkt": 1,
+       "bubble": "Response 数千字节",
+       "hl": [
+        "Message",
+        "max-repetitions"
+       ],
+       "vals": {
+        "Message": "请求 40 字节",
+        "max-repetitions": "50 → 响应上千字节"
+       },
+       "say": "代理按 max-repetitions 生成大量 varbind，全部打向伪造的源。",
+       "sub": "请求标识它根本不需要看，回包不看也照样生成。"
+      },
+      {
+       "who": "攻击者",
+       "to": "多个开放代理",
+       "pkt": 1,
+       "bubble": "并发上千台",
+       "evil": true,
+       "hl": [
+        "request-id",
+        "community"
+       ],
+       "vals": {
+        "request-id": "每次都不同",
+        "community": "public"
+       },
+       "say": "同样的包并发灌向上千个代理，放大倍数再乘代理数。",
+       "sub": "带宽在受害者侧汇聚，成本由第三方承担。"
+      },
+      {
+       "who": "受害者",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "链路打满",
+       "hl": [
+        "Message"
+       ],
+       "vals": {
+        "Message": "全是合法 SNMP 响应"
+       },
+       "say": "收到的全是格式完整的响应，源地址分布在整个互联网。",
+       "sub": "追溯只能追到被利用的代理，攻击者不在链路上。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "snmpbulkget -v2c -c public -Cn0 -Cr50 192.0.2.10 1.3.6.1.2.1.2.2.1",
+        "n": "-Cr50 让代理一次回 50 个后继值，回包通常是请求的几十倍",
+        "s": "补充（net-snmp 工具集，仓库未收录）"
+       },
+       {
+        "c": "sudo tcpdump -ni eth0 'udp port 161' -c 5 -vv",
+        "n": "看请求与响应长度差，两者之比就是放大倍数",
+        "s": "补充（tcpdump，仓库未收录）"
+       },
+       {
+        "c": "sudo hping3 --udp -a 198.51.100.9 -p 161 -c 100 192.0.2.10",
+        "n": "-a 伪造源地址发 100 个请求，回包全打向 198.51.100.9",
+        "s": "补充（hping3 伪造源地址）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetUDPEndpoint -LocalPort 161 -ErrorAction SilentlyContinue",
+        "n": "对照本机：开放代理就是在这里听 161 的那台",
+        "s": "补充（PowerShell NetTCPIP 模块，仓库未收录）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -an | findstr :161",
+        "n": "确认 161 的 UDP 监听形态，判断是否存在开放代理",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "版本白名单 + USM 认证 + 视图收敛，再关掉公网入口",
+   "lead": "认证解决「是不是他发的」，视图解决「他能看什么」，入口过滤解决「他能不能到」。",
+   "scenes": [
+    {
+     "name": "只能 v3 authPriv",
+     "steps": [
+      {
+       "who": "管理者",
+       "to": "代理",
+       "pkt": 2,
+       "bubble": "只许 v3 authPriv",
+       "hl": [
+        "msgVersion",
+        "msgFlags",
+        "msgSecurityModel"
+       ],
+       "vals": {
+        "msgVersion": "3",
+        "msgFlags": "0x03",
+        "msgSecurityModel": "3（USM）"
+       },
+       "say": "版本白名单只留 v3，团体名那条解析路径整条关掉。",
+       "sub": "版本号是解析路径的开关，必须按配置校验而非听报文自称。"
+      },
+      {
+       "who": "管理者",
+       "to": "代理",
+       "pkt": 3,
+       "bubble": "HMAC + 时间窗",
+       "hl": [
+        "msgAuthoritativeEngineBoots",
+        "msgAuthoritativeEngineTime",
+        "msgAuthenticationParameters"
+       ],
+       "vals": {
+        "msgAuthoritativeEngineBoots": "boots",
+        "msgAuthoritativeEngineTime": "time（±150 秒）",
+        "msgAuthenticationParameters": "12 字节 HMAC"
+       },
+       "say": "12 字节认证参数加 150 秒时间窗，伪造与重放都过不去。",
+       "sub": "boots 回退说明引擎被重置，旧报文一律拒。"
+      },
+      {
+       "who": "攻击者",
+       "to": "代理",
+       "pkt": 0,
+       "bubble": "v2c + public",
+       "evil": true,
+       "hl": [
+        "msgVersion",
+        "community"
+       ],
+       "vals": {
+        "msgVersion": "0（v1）",
+        "community": "public"
+       },
+       "say": "老办法重放一次：v2c 与 public 直接被版本策略丢掉。",
+       "sub": "没有 Response，扫描连第一步都过不了。"
+      },
+      {
+       "who": "攻击者",
+       "to": "代理",
+       "pkt": 1,
+       "bubble": "GetBulk 50",
+       "evil": true,
+       "hl": [
+        "max-repetitions",
+        "name (OID 1.3.6.1.2.1.2.2.1)"
+       ],
+       "vals": {
+        "max-repetitions": "被压到 10",
+        "name (OID 1.3.6.1.2.1.2.2.1)": "视图外 → noSuchObject"
+       },
+       "say": "批量请求被限到 10 条，VACM 视图外的子树根本不可见。",
+       "sub": "放大倍数的旋钮被拧小，信息面也一起收窄。"
+      },
+      {
+       "who": "代理",
+       "to": "—",
+       "pkt": 3,
+       "bubble": "视图只到必要子树",
+       "hl": [
+        "msgUserName",
+        "msgAuthenticationParameters"
+       ],
+       "vals": {
+        "msgUserName": "mon（只读视图）",
+        "msgAuthenticationParameters": "认证通过"
+       },
+       "say": "每个管理站一个用户、一份本地化密钥，读权限按视图给。",
+       "sub": "认证证明是谁，视图决定能读什么，两件事分开配。"
+      },
+      {
+       "who": "边界路由器",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "入口过滤",
+       "hl": [
+        "Message"
+       ],
+       "vals": {
+        "Message": "伪造源在边界被丢"
+       },
+       "say": "161 与 162 不对公网开放，边界做 uRPF 与 BCP38 拦伪造源。",
+       "sub": "放大器被关掉，反射这条路才真正断。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "snmpget -v3 -l authPriv -u mon -a SHA -A 'AuthPass1' -x AES -X 'PrivPass1' 192.0.2.10 1.3.6.1.2.1.1.1.0",
+        "n": "只有 authPriv 能读到值；换 -v2c 或错口令会超时",
+        "s": "补充（net-snmp 工具集，仓库未收录）"
+       },
+       {
+        "c": "snmpwalk -v2c -c public 192.0.2.10 1.3.6.1.2.1.1",
+        "n": "重放老办法：无响应即版本白名单生效",
+        "s": "补充（net-snmp 工具集，仓库未收录）"
+       },
+       {
+        "c": "sudo iptables -A INPUT -p udp --dport 161 ! -s 10.0.0.0/8 -j DROP",
+        "n": "161 只接受管理网段来源，公网查询直接丢",
+        "s": "补充（iptables 访问控制）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetUDPEndpoint -LocalPort 161 -ErrorAction SilentlyContinue",
+        "n": "确认本机不再对公网开放 161",
+        "s": "补充（PowerShell NetTCPIP 模块，仓库未收录）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall firewall add rule name=\"Block-SNMP\" dir=in action=block protocol=UDP localport=161",
+        "n": "在主机防火墙上封掉入向 161（管理网例外需另加允许规则）",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

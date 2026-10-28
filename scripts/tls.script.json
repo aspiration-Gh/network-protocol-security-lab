@@ -1,0 +1,582 @@
+{
+ "id": "tls",
+ "notes": {
+  "Client Version": {
+   "short": "降级攻击的主战场，就两个字节",
+   "more": "客户端在 ClientHello 里报自己支持的最高版本（本例 0x0303 即 TLS 1.2）；服务器若只支持更低版本就回自己的版本，客户端再自行判断是否接受。",
+   "sec": "中间人把它改成 0x0300 或 0x0301，双方就会在 SSLv3/TLS1.0 上握手；TLS_FALLBACK_SCSV 与 1.3 的降级哨兵都是针对这一点打的补丁。"
+  },
+  "Cipher Suites": {
+   "short": "列表里留着弱套件＝自备降级路",
+   "more": "每个套件 2 字节，按客户端偏好降序排列。本例四个里 0xc02f 是 ECDHE+AES-GCM，0x009c 是静态 RSA，0x002f 是 CBC。",
+   "sec": "只要列表里还有静态 RSA 或 CBC，中间人让前两个「协商失败」就能把连接拖到弱套件上；弱套件留在列表里等于自己提供了降级路径。"
+  },
+  "Session ID": {
+   "short": "恢复会话的 bearer 凭证",
+   "more": "32 字节会话标识，服务器在 ServerHello 里回填表示接受恢复，此后双方跳过证书鉴别，直接用缓存的主密钥与套件。它必须随机、不可枚举，并设置合理的过期时间。",
+   "sec": "拿到会话 ID 就能恢复别人的会话；可预测或长期有效的会话表等于一条后门。同理，恢复路径绕过证书鉴别是 triple handshake 的入口。"
+  },
+  "extended_master_secret (0x0017)": {
+   "short": "空扩展，专治握手被移植",
+   "more": "启用后主密钥派生会把整段握手 transcript 的哈希也纳入输入，而不再只用两个随机数。服务器在 ServerHello 里回显该扩展即表示同意。",
+   "sec": "没有它，攻击者可以把一条握手的密钥「移植」到另一条会话（triple handshake）；服务器不回显就等于这条防护被静默关掉。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "两个包定下全部参数：ClientHello 报价，ServerHello 定价",
+   "lead": "TLS 1.2 的握手是明文的，所以这一幕两个包都看得见。注意随机数与套件列表各自决定了什么。",
+   "scenes": [
+    {
+     "name": "ClientHello → ServerHello：协商就在这两个包里定死",
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "ClientHello",
+       "hl": [
+        "Client Version",
+        "Random",
+        "Cipher Suites"
+       ],
+       "vals": {
+        "Client Version": "0x0303（报最高支持）",
+        "Random": "32 字节随机数",
+        "Cipher Suites": "0xc02f 0xc02b 0x009c 0x002f"
+       },
+       "say": "明文宣告：我能用 TLS 1.2、这是我的随机数、这是我愿意用的四个套件。",
+       "sub": "列表里留着静态 RSA 与 CBC，等于自己预留了一条降级路径。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "ServerHello",
+       "hl": [
+        "Server Version",
+        "Random",
+        "Cipher Suite"
+       ],
+       "vals": {
+        "Server Version": "0x0303",
+        "Random": "32 字节（每次必须不同）",
+        "Cipher Suite": "0xc02f（ECDHE + AES-128-GCM）"
+       },
+       "say": "服务器挑一个套件、附上自己的随机数：协商结果到这一步就定型了。",
+       "sub": "套件必须来自客户端列表，版本也不能低于对方下限，否则就是被改过。"
+      },
+      {
+       "who": "客户端",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "验签 + 派生",
+       "hl": [
+        "Session ID",
+        "Session ID Length"
+       ],
+       "vals": {
+        "Session ID": "32 字节，留着复用这条会话",
+        "Session ID Length": "0x20"
+       },
+       "say": "证书用本地根证书逐级验签；两个随机数加预主密钥派生主密钥与会话密钥。",
+       "sub": "证书只证明「这把公钥属于这个域名」，随机数才保证每次密钥都不同。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "CCS + Finished",
+       "hl": [
+        "extended_master_secret (0x0017)",
+        "renegotiation_info (0xff01)"
+       ],
+       "vals": {
+        "extended_master_secret (0x0017)": "回显＝同意启用",
+        "renegotiation_info (0xff01)": "计数 0，首次握手"
+       },
+       "say": "ChangeCipherSpec 之后全走密文，Finished 校验整段握手有没有被改过。",
+       "sub": "EMS 把整段握手哈希纳入主密钥，堵住握手移植类攻击。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "application_data",
+       "hl": [
+        "Content Type",
+        "Record Length"
+       ],
+       "vals": {
+        "Content Type": "23 = application_data",
+        "Record Length": "≤ 2^14，超出须分块"
+       },
+       "say": "业务数据走记录协议：分块→压缩→算 MAC→整体加密→加 5 字节记录头。",
+       "sub": "MAC 盖明文、密文盖 MAC，接收方必须先解密再验。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "close_notify",
+       "hl": [
+        "Content Type"
+       ],
+       "vals": {
+        "Content Type": "21 = alert（close_notify）"
+       },
+       "say": "关闭也要可认证：close_notify 让对端知道是「发完了」而不是「被切断」。",
+       "sub": "少了这一步，攻击者切断 TCP 就能让你少读一段数据而不自知。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "openssl s_client -connect example.com:443 -tls1_2 -servername example.com",
+        "n": "-tls1_2 锁版本；输出含协商套件、会话 ID 与证书链",
+        "s": "补充（openssl 不在 vault，握手观察必备）"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'tcp port 443 and tcp[((tcp[12]&0xf0)>>2)] = 0x16'",
+        "n": "只抓握手记录（Content Type=0x16），ClientHello/ServerHello 明文可见",
+        "s": "补充（抓包必备）"
+       },
+       {
+        "c": "curl -sv https://example.com -o /dev/null",
+        "n": "-v 打出握手与证书，用于确认之后是否全为密文",
+        "s": "《系统》Linux.md · curl"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection example.com -Port 443 -InformationLevel Detailed",
+        "n": "先确认 443 可达，再谈握手层面的排查",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       },
+       {
+        "c": "Get-ChildItem Cert:\\CurrentUser\\Root | Measure-Object | Select-Object Count",
+        "n": "本地根证书数量：信任面越宽，被骗过的概率越高",
+        "s": "《系统》PowerShell.md · 证书与网络 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "curl -v https://example.com -o NUL",
+        "n": "Windows 10+ 自带 curl，-v 同样能看到协商的版本与套件",
+        "s": "补充（Windows 内置 curl，vault 未收录）"
+       },
+       {
+        "c": "netstat -ano | findstr :443",
+        "n": "连接状态与 PID，用来定位是哪个进程在握手",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "一条把连接拖回弱算法，一条直接从进程内存里读走私钥",
+   "lead": "第一场攻击没破解任何密码学，只是把协商结果换掉；第二场连握手都不需要。",
+   "scenes": [
+    {
+     "name": "版本降级：把连接搬回 CBC 的房间",
+     "steps": [
+      {
+       "who": "中间人",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "截获 ClientHello",
+       "evil": true,
+       "hl": [
+        "Client Version",
+        "Cipher Suites"
+       ],
+       "vals": {
+        "Client Version": "0x0303（客户端其实支持 1.2）",
+        "Cipher Suites": "含 0xc02f 前向安全套件"
+       },
+       "say": "中间人先看清客户端真实能力：TLS 1.2 加 ECDHE，一点都不弱。",
+       "sub": "他不解密，只负责让这次握手用不上这些能力。"
+      },
+      {
+       "who": "中间人",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "裁掉强套件",
+       "evil": true,
+       "hl": [
+        "Cipher Suites Length",
+        "Cipher Suites"
+       ],
+       "vals": {
+        "Cipher Suites Length": "0x0004（只剩两个）",
+        "Cipher Suites": "0x009c 0x002f（静态 RSA + CBC）"
+       },
+       "say": "删掉前向安全的套件，只留静态 RSA 与 CBC，再原样转发。",
+       "sub": "服务器毫不知情，只能从剩下的里挑，把对面当老客户端对待。"
+      },
+      {
+       "who": "服务器",
+       "to": "中间人",
+       "pkt": 1,
+       "bubble": "ServerHello",
+       "hl": [
+        "Server Version",
+        "Cipher Suite"
+       ],
+       "vals": {
+        "Server Version": "0x0301（被迫回 TLS 1.0）",
+        "Cipher Suite": "0x002f（CBC）"
+       },
+       "say": "服务器按被裁剪的能力集回应：版本更低、套件是 CBC。",
+       "sub": "这一步服务器没有错——它只是回答了别人伪造的问题。"
+      },
+      {
+       "who": "中间人",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "原样转发",
+       "evil": true,
+       "hl": [
+        "Cipher Suite",
+        "Random"
+       ],
+       "vals": {
+        "Cipher Suite": "0x002f（客户端没选过）",
+        "Random": "原样转发，不改"
+       },
+       "say": "客户端若只看「握手成功」，就会接受这个比自己能力弱的结果。",
+       "sub": "降级本身不泄密，它把连接搬到有已知缺陷的算法上。"
+      },
+      {
+       "who": "中间人",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "POODLE",
+       "evil": true,
+       "hl": [
+        "Record Length"
+       ],
+       "vals": {
+        "Record Length": "按填充预言反复改最后一块"
+       },
+       "say": "接着在 SSLv3/CBC 上做 POODLE：256 次请求恢复 1 字节，逐字节掏 Cookie。",
+       "sub": "这就是降级的价值：不直接偷，先把你搬回有洞的房间。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "openssl s_client -connect example.com:443 -tls1 -cipher 'AES128-SHA'",
+        "n": "能握手成功说明服务端还留着 TLS 1.0 + CBC，降级面没关",
+        "s": "补充（openssl 不在 vault）"
+       },
+       {
+        "c": "nmap --script ssl-enum-ciphers -p 443 example.com",
+        "n": "把服务端接受的版本与套件全列出来，弱套件一目了然",
+        "s": "补充（nmap NSE 脚本）"
+       },
+       {
+        "c": "curl -sv --tlsv1.0 --tls-max 1.0 https://example.com -o /dev/null",
+        "n": "强制旧版本；握手失败才是好结果（说明已禁）",
+        "s": "《系统》Linux.md · curl"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-ChildItem Cert:\\CurrentUser\\Root | Measure-Object | Select-Object Count",
+        "n": "根证书越多，能签出「合法」中间人证书的机构越多",
+        "s": "《系统》PowerShell.md · 证书与网络 Cmdlet"
+       },
+       {
+        "c": "Test-NetConnection example.com -Port 443 -InformationLevel Detailed",
+        "n": "排查降级前先确认通路本身正常",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "curl -v --tlsv1.0 --tls-max 1.0 https://example.com -o NUL",
+        "n": "与 Linux 侧同一条：报错才说明旧版本被拒",
+        "s": "补充（Windows 内置 curl）"
+       },
+       {
+        "c": "certutil -store Root | find \"CN=\"",
+        "n": "列出本机信任的根 CA，核对有没有不该信的",
+        "s": "补充（certutil 不在 vault）"
+       }
+      ]
+     }
+    },
+    {
+     "name": "心脏滴血：一次请求换 16 KB 内存",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "Heartbeat",
+       "evil": true,
+       "hl": [
+        "Content Type",
+        "Record Length"
+       ],
+       "vals": {
+        "Content Type": "24 = heartbeat",
+        "Record Length": "0x0003（实际只带 1 字节）"
+       },
+       "say": "发一个 Heartbeat：声明 payload_length=0x4000，实际只带 1 个字节。",
+       "sub": "旧版 OpenSSL 只信这个声明，不核对它与记录实际长度。"
+      },
+      {
+       "who": "服务器",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "越界读",
+       "hl": [
+        "Record Length"
+       ],
+       "vals": {
+        "Record Length": "按 0x4000 组装响应"
+       },
+       "say": "服务器从缓冲区指针起读 16384 字节当载荷，越过了请求的真实边界。",
+       "sub": "读到的东西可能是私钥、会话密钥、Cookie，或别人的请求明文。"
+      },
+      {
+       "who": "服务器",
+       "to": "攻击者",
+       "pkt": 1,
+       "bubble": "16 KB 内存",
+       "hl": [
+        "Content Type",
+        "Record Length"
+       ],
+       "vals": {
+        "Content Type": "24 = heartbeat",
+        "Record Length": "0x4004（16 KB 内存）"
+       },
+       "say": "一次请求换 16 KB 进程内存：响应大小完全由攻击者指定。",
+       "sub": "连接不复位就能连续读，等于给服务器做了一次内存转储。"
+      },
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "换偏移重发",
+       "evil": true,
+       "hl": [
+        "Record Length"
+       ],
+       "vals": {
+        "Record Length": "每次换偏移，内存逐段 dump"
+       },
+       "say": "同一连接里反复请求、每次偏移不同，可以把大块堆内存搬下来。",
+       "sub": "抓得够多，私钥与历史会话密钥都可能出现在里面。"
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "离线解密",
+       "evil": true,
+       "hl": [
+        "Session ID",
+        "Random"
+       ],
+       "vals": {
+        "Session ID": "从内存里捞到的会话",
+        "Random": "配合私钥还原会话密钥"
+       },
+       "say": "拿到私钥后，静态 RSA 套件的历史流量可以离线解开。",
+       "sub": "没有前向安全，一把私钥就把过去全补上——这是 RSA 密钥交换的代价。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "nmap -p 443 --script ssl-heartbleed example.com",
+        "n": "直接判定是否受 CVE-2014-0160 影响",
+        "s": "补充（nmap NSE 脚本）"
+       },
+       {
+        "c": "openssl s_client -connect example.com:443 -tlsextdebug 2>&1 | grep -i heartbeat",
+        "n": "看服务端是否宣告 heartbeat 扩展，没宣告就少一条路",
+        "s": "补充（openssl 不在 vault）"
+       },
+       {
+        "c": "openssl version -a",
+        "n": "本机 OpenSSL 版本与构建时间，核对是否 ≥1.0.1g",
+        "s": "补充（openssl 不在 vault）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-Command openssl -ErrorAction SilentlyContinue | Select-Object Source",
+        "n": "定位本机 openssl，再用它核版本（Windows 上常是第三方构建）",
+        "s": "《系统》PowerShell.md · 进程与命令查找"
+       },
+       {
+        "c": "Test-NetConnection example.com -Port 443 -InformationLevel Detailed",
+        "n": "确认 443 可达，否则探测结果全是假阴性",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "curl -v --tlsv1.2 https://example.com -o NUL",
+        "n": "看服务端宣告的扩展里有没有 heartbeat",
+        "s": "补充（Windows 内置 curl）"
+       },
+       {
+        "c": "netstat -ano | findstr :443",
+        "n": "确认连接真的到了目标，而不是被中间设备接管",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "同一场降级再走一遍：这次客户端逐项核对协商结果",
+   "lead": "防护不改密码学，只改两处：客户端敢不敢拒绝，服务端还留不留弱套件。",
+   "scenes": [
+    {
+     "name": "客户端拒绝弱结果，服务端不留弱算法",
+     "steps": [
+      {
+       "who": "中间人",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "裁套件 + 压版本",
+       "evil": true,
+       "hl": [
+        "Cipher Suites",
+        "Client Version"
+       ],
+       "vals": {
+        "Cipher Suites": "只剩 0x002f",
+        "Client Version": "改成 0x0301"
+       },
+       "say": "同一手法重放：裁掉强套件、压低版本，试图把连接拖回 CBC。",
+       "sub": "这次客户端不再只看「握手成功」这四个字。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "handshake_failure",
+       "hl": [
+        "Server Version",
+        "Cipher Suite"
+       ],
+       "vals": {
+        "Server Version": "0x0301 → 低于我的下限",
+        "Cipher Suite": "0x002f → 不在我给的列表里"
+       },
+       "say": "客户端逐项核对：版本低于下限、套件不在自己列表内，直接中止握手。",
+       "sub": "降级要成功必须客户端不检查——防护就是把这项检查补上。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "SCSV 重试",
+       "hl": [
+        "Cipher Suites"
+       ],
+       "vals": {
+        "Cipher Suites": "… 0x5600（TLS_FALLBACK_SCSV）"
+       },
+       "say": "降级重试时带上 0x5600，服务端看到就回 inappropriate_fallback。",
+       "sub": "它只防客户端自己降级重试，对直接改包的中间人无效。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "只留 AEAD",
+       "hl": [
+        "Cipher Suite",
+        "Compression Method"
+       ],
+       "vals": {
+        "Cipher Suite": "只允许 ECDHE + GCM/ChaCha20",
+        "Compression Method": "0x00（压缩永久禁用）"
+       },
+       "say": "服务端关掉 SSLv3/TLS1.0、CBC、静态 RSA 与压缩，降级无处可落。",
+       "sub": "关压缩顺带除掉 CRIME，换 AEAD 除掉填充预言。"
+      },
+      {
+       "who": "服务器",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "关 heartbeat",
+       "hl": [
+        "Content Type"
+       ],
+       "vals": {
+        "Content Type": "24 = heartbeat → 直接丢弃"
+       },
+       "say": "心脏滴血靠补丁加关扩展；一旦泄露就必须换证书、作废全部会话票据。",
+       "sub": "只打补丁不够：已经流出去的私钥不会自己回来。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "openssl s_client -connect example.com:443 -tls1_2 -cipher 'ECDHE+AESGCM:ECDHE+CHACHA20'",
+        "n": "只用 AEAD 套件握手：成功说明服务端不再依赖 CBC",
+        "s": "补充（openssl 不在 vault）"
+       },
+       {
+        "c": "nmap --script ssl-enum-ciphers -p 443 example.com",
+        "n": "复核清单只剩 TLS1.2+/AEAD，没有 3DES、RC4、CBC",
+        "s": "补充（nmap NSE 脚本）"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'tcp port 443 and tcp[((tcp[12]&0xf0)>>2)] != 0x16'",
+        "n": "防护后线路上基本只剩应用数据记录",
+        "s": "补充（抓包必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "[Net.ServicePointManager]::SecurityProtocol",
+        "n": "本机默认允许的协议；出现 Tls/Tls11 说明还在允许旧版本",
+        "s": "《系统》PowerShell.md · .NET 安全协议设置"
+       },
+       {
+        "c": "Test-NetConnection example.com -Port 443 -InformationLevel Detailed",
+        "n": "收紧配置后复测：正常客户必须还能连上",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh http show sslcert",
+        "n": "本机 443 绑定的证书与哈希；换证书后据此核对是否真的换了",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "curl -sI --tlsv1.2 --tls-max 1.2 https://example.com",
+        "n": "强制 1.2 的可达性验证，顺便看响应头有没有异常",
+        "s": "补充（Windows 内置 curl）"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

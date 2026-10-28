@@ -1,0 +1,541 @@
+{
+ "id": "vlan",
+ "notes": {
+  "TPID": {
+   "short": "标签类型号，0x8100",
+   "more": "2 字节：0x8100 是 802.1Q 标签，0x88A8 是 802.1ad（QinQ 外层），0x9100 是部分厂商的私有双标签标记。它把后面所有字段整体后移 4 字节。",
+   "sec": "设备只认 TPID 判断有没有标签，改 TPID 就能让帧绕过只看 0x8100 的过滤器。"
+  },
+  "TCI": {
+   "short": "2B：优先级+DEI+VID",
+   "more": "高 3 bit 是 PCP 优先级，中间 1 bit 是 DEI，低 12 bit 是 VID。VID 取 1~4094，0 与 4095 保留，1 通常是 native。",
+   "sec": "12 位 VID 只是分类标记，不加密也不认证，改一个字节就换了广播域。"
+  },
+  "Outer TCI": {
+   "short": "外层标签的 VID",
+   "more": "双标签帧里外层交换机只看这一层。攻击者把外层写成 native VLAN 的 VID，交换机就会把它当成普通 native 流量收下并剥掉。",
+   "sec": "外层 VID 是双标签跳跃的唯一开关，native VLAN 隔离就是从这里掐断。"
+  },
+  "Inner TCI": {
+   "short": "内层 VID，真正目标",
+   "more": "外层被剥掉后，这一层就成了线上唯一的标签，被下一跳交换机当作合法 VLAN。12 位空间内的任意 VID 都可以被填进来。",
+   "sec": "内层 VID 决定帧落进哪个广播域，它是注入的目标而非障碍。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "4 字节标签、12 位 VID：一台交换机被切成多个互不广播的广播域",
+   "lead": "看一帧从 access 口进去、过 trunk、再从另一个 access 口出来的全过程。标签只在交换机之间活着。",
+   "scenes": [
+    {
+     "name": "打标签、过 trunk、剥标签",
+     "steps": [
+      {
+       "who": "交换机 S1",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "插入 4B 标签",
+       "hl": [
+        "TPID",
+        "TCI"
+       ],
+       "vals": {
+        "TPID": "0x8100（刚插入的标签）",
+        "TCI": "PCP=5, DEI=0, VID=100（按端口 PVID 打）"
+       },
+       "say": "帧进 access 口，交换机在源地址后插入 4 字节，VID 取端口 PVID。",
+       "sub": "标签把「物理端口」变成了「逻辑广播域」。"
+      },
+      {
+       "who": "交换机 S1",
+       "to": "交换机 S2（trunk）",
+       "pkt": 0,
+       "bubble": "带标签上行",
+       "hl": [
+        "TPID",
+        "TCI",
+        "Type"
+       ],
+       "vals": {
+        "TCI": "VID=100 原样保留",
+        "Type": "0x0800（标签之后才是类型）"
+       },
+       "say": "trunk 上每帧都带标签，哪个帧属于哪个 VLAN 一目了然。",
+       "sub": "标签不计入 1500 的 MTU，但计入 64~1518 的帧长。"
+      },
+      {
+       "who": "交换机 S2",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "查 VID 表",
+       "hl": [
+        "TCI"
+       ],
+       "vals": {
+        "TCI": "VID=100 → 只在 VLAN 100 的成员口里查"
+       },
+       "say": "S2 用 VID 选出转发表，只在 VLAN 100 的端口里找目的地址。",
+       "sub": "别的 VID 的端口连帧都看不到，这就是隔离。"
+      },
+      {
+       "who": "交换机 S2",
+       "to": "VLAN 100 主机",
+       "pkt": 0,
+       "bubble": "剥标签",
+       "hl": [
+        "Destination Address",
+        "Type"
+       ],
+       "vals": {
+        "Destination Address": "00:1a:2b:3c:4d:5e（VLAN 100 内）",
+        "Type": "0x0800（标签已剥，位置回移 4B）"
+       },
+       "say": "出口是 access 口，交换机剥掉标签，主机收到普通 V2 帧。",
+       "sub": "终端全程不知道 VLAN 存在。"
+      },
+      {
+       "who": "交换机 S1",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "native VLAN",
+       "hl": [
+        "TCI"
+       ],
+       "vals": {
+        "TCI": "VID=1（native，trunk 上不打标签）"
+       },
+       "say": "native VLAN 的帧在 trunk 上不带标签——这正是双标签的缺口。",
+       "sub": "两端 native VLAN 不一致，本身就是串 VLAN 的成因。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo ip link add link eth0 name eth0.100 type vlan id 100",
+        "n": "在 Linux 上造一个 VLAN 100 子接口，等价交换机上划一个 VLAN",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "ip -d link show eth0.100",
+        "n": "-d 会显示 vlan id 100 与 protocol 802.1Q，确认标签真挂上了",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "sudo tcpdump -eni eth0 -c 5 'vlan'",
+        "n": "只抓带 802.1Q 标签的帧，输出里能看到 vlan 100 与优先级",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv4 | Format-Table InterfaceAlias,IPAddress,PrefixLength",
+        "n": "按接口看网段：不同网段往往对应不同 VLAN",
+        "s": "《系统》PowerShell.md · 获取本机 IP 配置：Get-NetIPAddress"
+       },
+       {
+        "c": "Get-NetAdapter | Format-Table Name,InterfaceDescription,LinkSpeed,MtuSize",
+        "n": "MTU 一栏：打标签后载荷少 4 字节，跨 trunk 容易撞 MTU",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "ipconfig /all",
+        "n": "看每块网卡的 IP 与默认网关，确认主机落在哪个 VLAN 网段",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       },
+       {
+        "c": "netsh interface ipv4 show subinterfaces",
+        "n": "列出接口与 MTU，排查打过标签后大包不通",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "双标签骗过外层剥离，DTP 一条网线谈成 trunk：隔离被两种方式绕开",
+   "lead": "VLAN 是隔离不是加密。攻击只做一件事：让帧出现在不该出现的 VID 上。",
+   "scenes": [
+    {
+     "name": "双标签跳跃（Double Tagging）",
+     "steps": [
+      {
+       "who": "攻击者 A",
+       "to": "交换机 S1（access 口，VLAN 10）",
+       "pkt": 1,
+       "bubble": "双 0x8100",
+       "hl": [
+        "Outer TPID",
+        "Outer TCI",
+        "Inner TPID",
+        "Inner TCI"
+       ],
+       "vals": {
+        "Outer TCI": "VID=1（native）",
+        "Inner TCI": "VID=20（想进的那个 VLAN）"
+       },
+       "say": "一帧塞两个标签：外层写 native VLAN，内层写想进的那个。",
+       "sub": "接入口只认外层，内层被当成载荷原样带走。",
+       "evil": true
+      },
+      {
+       "who": "交换机 S1",
+       "to": "交换机 S2（trunk）",
+       "pkt": 1,
+       "bubble": "剥外层",
+       "hl": [
+        "Inner TPID",
+        "Inner TCI"
+       ],
+       "vals": {
+        "Inner TCI": "VID=20（此时成了线上唯一的标签）"
+       },
+       "say": "S1 按 native VLAN 处理，剥掉外层后从 trunk 发出。",
+       "sub": "剩下那一层，S2 会当成合法的 VLAN 20 标签。"
+      },
+      {
+       "who": "交换机 S2",
+       "to": "VLAN 20 主机",
+       "pkt": 1,
+       "bubble": "投递成功",
+       "hl": [
+        "Destination Address",
+        "Inner TCI"
+       ],
+       "vals": {
+        "Destination Address": "VLAN 20 内某台主机的 MAC",
+        "Inner TCI": "VID=20 → 从 VLAN 20 的端口送出"
+       },
+       "say": "S2 按内层 VID=20 转发，帧落进目标 VLAN 的端口。",
+       "sub": "攻击者已经在目标广播域里了。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "单向",
+       "hl": [
+        "Data + Pad"
+       ],
+       "vals": {
+        "Data + Pad": "伪造的 ARP 应答（网关 IP → 攻击者 MAC）"
+       },
+       "say": "这条路是单向的：目标 VLAN 的回包不会按原路回到攻击者。",
+       "sub": "所以双标签用来注入（投毒、扫端口），不是双向中间人。",
+       "evil": true
+      },
+      {
+       "who": "交换机 S2",
+       "to": "受害者",
+       "pkt": 1,
+       "bubble": "缓存被覆盖",
+       "hl": [
+        "Destination Address"
+       ],
+       "vals": {
+        "Destination Address": "受害者 MAC（它的 ARP 缓存已指向攻击者）"
+       },
+       "say": "受害者接受伪造 ARP，把网关 MAC 换成攻击者，后续上行全走它。",
+       "sub": "单向注入加缓存覆盖，等于一侧中间人。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -eni eth0 'vlan and vlan'",
+        "n": "抓一帧两个标签的帧：输出会出现 vlan 1, vlan 20 两层",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo tcpdump -eni eth0 'ether[12:2]=0x8100 and ether[16:2]=0x8100'",
+        "n": "按字节偏移硬匹配双标签：偏移 12 与 16 都是 0x8100",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo ip link add link eth0 name eth0.20 type vlan id 20",
+        "n": "在本机造 VLAN 20 子接口：验证「能不能进那个 VLAN」最直接",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv4 | Format-Table InterfaceAlias,IPAddress,PrefixLength",
+        "n": "列出本机能到的网段：出现不属于自己 VLAN 的网段就是越界",
+        "s": "《系统》PowerShell.md · 获取本机 IP 配置：Get-NetIPAddress"
+       },
+       {
+        "c": "Get-NetAdapterStatistics | Format-Table Name,ReceivedUnicastPackets",
+        "n": "收到本不该到达的帧，单播收包会异常增长",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "arp -a",
+        "n": "看目标 VLAN 内的主机是否出现在本机 ARP 表——注入成功后会出现",
+        "s": "《系统》Windows CMD.md · arp"
+       },
+       {
+        "c": "netsh interface ipv4 show interfaces",
+        "n": "接口与 MTU：双标签多 4 字节，跨 MTU 时大包先丢",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    },
+    {
+     "name": "交换机欺骗：DTP 把接入口谈成 trunk",
+     "steps": [
+      {
+       "who": "攻击者 A",
+       "to": "交换机 S1",
+       "pkt": 0,
+       "bubble": "DTP 请求 trunk",
+       "hl": [
+        "Destination Address"
+       ],
+       "vals": {
+        "Destination Address": "01:80:c2:00:00:0d（DTP 组播，交换机必收）"
+       },
+       "say": "往接入口发 DTP 请求：端口若是 auto 或 desirable 就会谈成 trunk。",
+       "sub": "DTP 帧本身不带标签，谈成了后续帧才带。",
+       "evil": true
+      },
+      {
+       "who": "交换机 S1",
+       "to": "攻击者 A",
+       "pkt": 0,
+       "bubble": "trunk 已启用",
+       "hl": [
+        "TPID",
+        "TCI"
+       ],
+       "vals": {
+        "TPID": "0x8100（该口开始收带标签帧）",
+        "TCI": "允许 VLAN 1-4094 全部"
+       },
+       "say": "端口变成 trunk，每个 VLAN 的带标签帧都送到这条网线。",
+       "sub": "一条网线等于全部 VLAN 的读权限。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "读 VLAN 100",
+       "hl": [
+        "TPID",
+        "TCI",
+        "Data + Pad"
+       ],
+       "vals": {
+        "TCI": "VID=100（业务 VLAN）",
+        "Data + Pad": "别人的业务载荷，明文"
+       },
+       "say": "在 trunk 上抓包，VID=100 的业务流量整段可读。",
+       "sub": "标签只是分类标记，没有任何加密。",
+       "evil": true
+      },
+      {
+       "who": "攻击者 A",
+       "to": "VLAN 20",
+       "pkt": 0,
+       "bubble": "改 VID 回注",
+       "hl": [
+        "TPID",
+        "TCI"
+       ],
+       "vals": {
+        "TCI": "改成 VID=20 再发回，直接落进目标 VLAN"
+       },
+       "say": "把抓到的帧改个 VID 再注入，等于在任意 VLAN 里有一台主机。",
+       "sub": "trunk 给的是读写权，不只是读。",
+       "evil": true
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -eni eth0 'ether dst 01:80:c2:00:00:0d'",
+        "n": "抓 DTP 帧：接入口还在发/回 DTP，就说明没关协商",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo tcpdump -eni eth0 -c 10 'vlan'",
+        "n": "自己口上能抓到带标签帧，说明这个口已经是 trunk",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo ip link add link eth0 name eth0.20 type vlan id 20 && sudo ip addr add 192.168.20.66/24 dev eth0.20",
+        "n": "造 VLAN 20 子接口并配址，验证能否与目标 VLAN 通信",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetAdapter | Format-Table Name,Status,LinkSpeed",
+        "n": "确认网卡处于 Up 且能收到非本网段的帧",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetIPAddress | Format-Table InterfaceAlias,IPAddress",
+        "n": "一个物理口上出现多个网段地址，就是越界信号",
+        "s": "《系统》PowerShell.md · 获取本机 IP 配置：Get-NetIPAddress"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "ipconfig /all",
+        "n": "看网卡上是否出现多个网段地址——越界的直接信号",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       },
+       {
+        "c": "arp -a",
+        "n": "能直接解析到别的 VLAN 的主机 MAC，说明二层已经打通",
+        "s": "《系统》Windows CMD.md · arp"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "关协商、把 native VLAN 换成黑洞、收窄 trunk 允许列表：两条路同时断",
+   "lead": "双标签打的是 native VLAN，交换机欺骗打的是 DTP。一个改配置，一个关协议。",
+   "scenes": [
+    {
+     "name": "access 口写死 + native 隔离 + 允许列表收敛",
+     "steps": [
+      {
+       "who": "交换机 S1（接入口）",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "mode access + nonegotiate",
+       "hl": [
+        "TCI"
+       ],
+       "vals": {
+        "TCI": "PVID=100（只做 access，不发也不应 DTP）"
+       },
+       "say": "接入口写死 access 且 nonegotiate：DTP 请求没人应答，谈不成 trunk。",
+       "sub": "漏配一个口，整台交换机的隔离就等于没有。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "交换机 S1",
+       "pkt": 1,
+       "bubble": "外层不再命中",
+       "hl": [
+        "Outer TCI",
+        "Inner TCI"
+       ],
+       "vals": {
+        "Outer TCI": "VID=1 → native 已改成 999，不匹配",
+        "Inner TCI": "VID=20（进不来）"
+       },
+       "say": "native VLAN 换成不承载业务的 999，双标签的外层失去意义。",
+       "sub": "外层剥掉后落到黑洞 VLAN，内层到不了业务口。",
+       "evil": true
+      },
+      {
+       "who": "交换机 S1",
+       "to": "交换机 S2（trunk）",
+       "pkt": 1,
+       "bubble": "VID 不在允许列表",
+       "hl": [
+        "Inner TCI"
+       ],
+       "vals": {
+        "Inner TCI": "VID=20 → 只放行 100 与 999，直接丢弃"
+       },
+       "say": "trunk 显式列出允许的 VLAN，没列的 VID 一律丢。",
+       "sub": "这条规则同时挡住跳跃与误配串 VLAN。"
+      },
+      {
+       "who": "VLAN 100 主机",
+       "to": "交换机 S1",
+       "pkt": 0,
+       "bubble": "正常帧仍通",
+       "hl": [
+        "TPID",
+        "TCI"
+       ],
+       "vals": {
+        "TCI": "VID=100（业务 VLAN 放行）"
+       },
+       "say": "业务 VLAN 100 的帧照常打标签上行，隔离与连通同时成立。",
+       "sub": "代价是必须逐口、逐链路配置一致。"
+      },
+      {
+       "who": "运维",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "空口 shutdown",
+       "hl": [
+        "TCI"
+       ],
+       "vals": {
+        "TCI": "未用端口 shutdown 并划入黑洞 VLAN"
+       },
+       "say": "多余端口全关，能插线即用的口少一个，暴露面就少一块。",
+       "sub": "临时打开的口最容易被忘记恢复，整改后要复查。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "bridge vlan show",
+        "n": "每个网桥端口的 PVID 与允许 VLAN 列表——交换机配置的等价物",
+        "s": "补充（bridge 命令，vault 未收录）"
+       },
+       {
+        "c": "sudo bridge vlan add dev eth1 vid 100 pvid untagged",
+        "n": "把 eth1 配成 VLAN 100 的 access 口（PVID=100、出口不带标签）",
+        "s": "补充（bridge 命令，vault 未收录）"
+       },
+       {
+        "c": "sudo bridge vlan add dev eth0 vid 100 tagged",
+        "n": "把 eth0 配成 trunk 只放行 VLAN 100，按需开而不是全开",
+        "s": "补充（bridge 命令，vault 未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetAdapter | Format-Table Name,Status,MtuSize",
+        "n": "复核网卡状态与 MTU，改过 VLAN 后大包能不能过",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv4 | Format-Table InterfaceAlias,IPAddress",
+        "n": "确认主机只拿到本 VLAN 网段的地址",
+        "s": "《系统》PowerShell.md · 获取本机 IP 配置：Get-NetIPAddress"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh interface ipv4 show subinterfaces",
+        "n": "按接口看 MTU；不符时表现为小包通、大包不通",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "ipconfig /all",
+        "n": "确认主机地址没有越界到别的 VLAN 网段",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

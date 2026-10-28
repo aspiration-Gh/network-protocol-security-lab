@@ -1,0 +1,599 @@
+{
+ "id": "l2tp",
+ "notes": {
+  "Flags + Version": {
+   "short": "T/L/S/O/P + 版本 2",
+   "more": "首字节最高位 T 区分控制(1)与数据(0)，接着 L(有长度)、S(有 Ns/Nr)、O(有偏移)、P(优先级)，低 4 位是版本。控制消息必须 T=1、L=1、S=1、O=0。",
+   "sec": "解析器靠这几位决定头有多长，乱填能触发长度计算错位。"
+  },
+  "Tunnel ID": {
+   "short": "填接收方给的隧道号",
+   "more": "2 字节，指这条隧道在接收方那里的编号。两个方向取值不同：谁发的报文就填对端分配的 ID。SCCRQ 里填 0，因为还不知道对端的号。",
+   "sec": "16 位明文且可枚举，命中一个 ID 就能拆掉整条隧道。"
+  },
+  "AVP: Message Type": {
+   "short": "第一条 AVP，定报文类型",
+   "more": "必须是最前面的 AVP，值 1=SCCRQ、2=SCCRP、4=StopCCN、6=CDN 等。整个控制通道的状态机就靠它推进，伪造它等于伪造控制消息。",
+   "sec": "类型字段无认证，一条伪造的 StopCCN 就能清空整条隧道。"
+  },
+  "Ns": {
+   "short": "控制通道发送序号",
+   "more": "2 字节，本端控制通道的当前序号，只在 S=1 时存在。控制消息靠 Ns/Nr 做窗口与重传，数据消息默认不带，隧道层不为数据保可靠。",
+   "sec": "序号只用于排序与重传，不参与任何安全判定，不抗重放。"
+  },
+  "Nr": {
+   "short": "期望收到的下一个序号",
+   "more": "2 字节，表示已正确收到对方该序号之前的全部报文，同时也是对它们的确认。接收窗口大小由 Receive Window Size AVP 声明。",
+   "sec": "ACK 语义可被伪造，攻击者能构造出「对端已确认」的假象。"
+  },
+  "AVP: Result Code": {
+   "short": "StopCCN 里的拆隧道原因",
+   "more": "值 1 一般性错误、2 资源不足、3 协议版本不支持、4 未授权，后面还可跟可选 Error Code。拆隧道时用来告诉对端为什么断。",
+   "sec": "原因字段完全由发送方填写，被伪造时运维会被误导到错误方向。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "控制通道建隧道（可靠、带序号），数据通道搬 PPP（尽力而为）",
+   "lead": "两种报文只差一个 T 位：T=1 是控制，T=0 是数据。隧道本身不加密。",
+   "scenes": [
+    {
+     "name": "建控制连接 → 建会话 → 传数据 → 拆隧道",
+     "steps": [
+      {
+       "who": "LAC",
+       "to": "LNS",
+       "pkt": 0,
+       "bubble": "SCCRQ",
+       "hl": [
+        "Flags + Version",
+        "Tunnel ID",
+        "Session ID",
+        "AVP: Message Type",
+        "AVP: Assigned Tunnel ID"
+       ],
+       "vals": {
+        "Flags + Version": "0xC8 0x02 = T=1, L=1, S=1, 版本 2",
+        "Tunnel ID": "0x0000（还不知道对端的号）",
+        "Session ID": "0x0000（控制消息固定填 0）",
+        "AVP: Message Type": "1 = SCCRQ",
+        "AVP: Assigned Tunnel ID": "42（以后发给我的报文填 42）"
+       },
+       "say": "SCCRQ 开隧道：Tunnel ID 填 0，用 AVP 告诉对方「以后叫我 42」。",
+       "sub": "控制消息必须 L=1、S=1、O=0，缺一不可。"
+      },
+      {
+       "who": "LAC",
+       "to": "LNS",
+       "pkt": 0,
+       "bubble": "CHAP 双向认证",
+       "hl": [
+        "AVP: Message Type",
+        "AVP: Host Name",
+        "AVP: Protocol Version"
+       ],
+       "vals": {
+        "AVP: Message Type": "SCCRQ/SCCRP 中夹带 Challenge/Response AVP",
+        "AVP: Host Name": "lac1（对端据此识别）",
+        "AVP: Protocol Version": "0x0100（v1 r0）"
+       },
+       "say": "控制连接建立时用 CHAP 做双向认证，比 PPP 常见的单向更强。",
+       "sub": "它基于共享密钥，且不保护数据通道。"
+      },
+      {
+       "who": "LAC",
+       "to": "LNS",
+       "pkt": 0,
+       "bubble": "建会话",
+       "hl": [
+        "Tunnel ID",
+        "AVP: Assigned Tunnel ID"
+       ],
+       "vals": {
+        "Tunnel ID": "0x002a = 42（用对端给的号称呼它）",
+        "AVP: Assigned Tunnel ID": "会话阶段分配 Session ID = 0x0101"
+       },
+       "say": "隧道里再建会话：一条隧道复用多条会话，靠 Session ID 区分用户。",
+       "sub": "隧道号与会话号都是 16 位明文。"
+      },
+      {
+       "who": "LAC",
+       "to": "LNS",
+       "pkt": 1,
+       "bubble": "数据报文 T=0",
+       "hl": [
+        "Flags + Version",
+        "Tunnel ID",
+        "Session ID",
+        "PPP Protocol"
+       ],
+       "vals": {
+        "Flags + Version": "0x40 0x02 = T=0（数据）, L=1, S=0",
+        "Tunnel ID": "0x0007（LNS 分配的号）",
+        "Session ID": "0x0101",
+        "PPP Protocol": "0x0021 = IPv4"
+       },
+       "say": "数据报文头只有 8 字节，后面把 PPP 帧原样装进去。",
+       "sub": "S=0 时不带 Ns/Nr，隧道层不为数据保可靠。"
+      },
+      {
+       "who": "LNS",
+       "to": "LAC",
+       "pkt": 2,
+       "bubble": "StopCCN",
+       "hl": [
+        "Flags + Version",
+        "Tunnel ID",
+        "Session ID",
+        "AVP: Message Type",
+        "AVP: Result Code"
+       ],
+       "vals": {
+        "Tunnel ID": "0x002a = 42（指向 LAC 的隧道）",
+        "Session ID": "0x0000（作用于整条隧道）",
+        "AVP: Message Type": "4 = StopCCN",
+        "AVP: Result Code": "1 = General error"
+       },
+       "say": "拆隧道：一条 36 字节的 StopCCN，Session ID 填 0 影响全部会话。",
+       "sub": "先断会话再断控制连接，顺序不能反。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ss -uanp | grep 1701",
+        "n": "谁在监听/占用 UDP 1701——L2TP 的端口",
+        "s": "《系统》Linux.md · ss"
+       },
+       {
+        "c": "sudo tcpdump -ni any -c 5 'udp port 1701'",
+        "n": "先确认有没有 1701 流量，隧道到底跑没跑起来",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo tcpdump -ni any -X -c 5 'udp port 1701 and udp[8] & 0x80 != 0'",
+        "n": "udp[8] 最高位是 T 位：非零即控制消息，可直接看 Ns/Nr 与 AVP",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetUDPEndpoint | Where-Object LocalPort -eq 1701 | Format-Table LocalAddress,LocalPort,OwningProcess",
+        "n": "本机 1701 的 UDP 端点与占用进程",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetAdapter | Where-Object InterfaceDescription -like '*L2TP*' | Format-Table Name,Status",
+        "n": "WAN Miniport (L2TP) 的连接状态",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -ano -p UDP | findstr :1701",
+        "n": "UDP 1701 的监听与占用 PID；无输出即本机没有 1701 端点",
+        "s": "《系统》Windows CMD.md · netstat"
+       },
+       {
+        "c": "netsh interface ipv4 show interfaces",
+        "n": "隧道对应的虚拟接口与 MTU（L2TP 会缩减 MTU）",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "两个 ID 明文可见：向内可注入伪造数据，向上可伪造控制消息拆隧道",
+   "lead": "L2TP 只给了「封装」，没给「保护」。所以攻击分两路：读/写数据通道，和打断控制通道。",
+   "scenes": [
+    {
+     "name": "明文嗅探 + 数据报文注入",
+     "steps": [
+      {
+       "who": "攻击者 A",
+       "to": "骨干网",
+       "pkt": 1,
+       "bubble": "嗅探 1701",
+       "hl": [
+        "Flags + Version",
+        "Tunnel ID",
+        "Session ID"
+       ],
+       "vals": {
+        "Tunnel ID": "0x0007（明文）",
+        "Session ID": "0x0101（明文）"
+       },
+       "say": "在 LAC 与 LNS 之间抓 UDP 1701，隧道号与会话号全是明文。",
+       "sub": "不需要任何密钥就能分流到某个用户。",
+       "evil": true
+      },
+      {
+       "who": "攻击者 A",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "剥壳读载荷",
+       "hl": [
+        "PPP Protocol",
+        "IPv4 Header",
+        "TCP Header"
+       ],
+       "vals": {
+        "PPP Protocol": "0x0021（IPv4 原样可见）",
+        "IPv4 Header": "源/目的 IP 直接可读",
+        "TCP Header": "端口也在，业务一眼可辨"
+       },
+       "say": "剥掉 IP/UDP/L2TP 三层头，里面就是明文 IP 包。",
+       "sub": "HTTP、FTP 口令、DNS 查询全部可读。",
+       "evil": true
+      },
+      {
+       "who": "攻击者 A",
+       "to": "LNS",
+       "pkt": 1,
+       "bubble": "伪造注入",
+       "hl": [
+        "Tunnel ID",
+        "Session ID",
+        "IPv4 Header"
+       ],
+       "vals": {
+        "Tunnel ID": "0x0007（照抄）",
+        "Session ID": "0x0101（照抄）",
+        "IPv4 Header": "换成自己的 IP 包（扫描/投毒）"
+       },
+       "say": "用抓到的两个 ID 构造数据报文，从隧道外部直接注入。",
+       "sub": "LNS 只按 ID 查虚拟接口，不校验来源与内容。",
+       "evil": true
+      },
+      {
+       "who": "LNS",
+       "to": "企业内网",
+       "pkt": 1,
+       "bubble": "进内部",
+       "hl": [
+        "IPv4 Header",
+        "TCP Header"
+       ],
+       "vals": {
+        "IPv4 Header": "攻击者的 IP 包被当成该用户的流量",
+        "TCP Header": "可以从内部扫内网端口了"
+       },
+       "say": "LNS 把它当成该用户的流量转发进企业网，内部就有了一台主机。",
+       "sub": "后续扫描、横向移动都从这里开始。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "改完直接发",
+       "hl": [
+        "Length"
+       ],
+       "vals": {
+        "Length": "改长度后重算 UDP/IP 校验和即可通过"
+       },
+       "say": "改写载荷只需同步改长度与校验和，接收端没有完整性校验。",
+       "sub": "这就是 L2TP 必须配 IPsec 的原因。",
+       "evil": true
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any -X -c 3 'udp port 1701 and udp[8] & 0x80 == 0'",
+        "n": "只抓数据报文（T=0），-X 显示隧道里明文的 IP/TCP 头",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo tcpdump -ni any -A -c 3 'udp port 1701'",
+        "n": "-A 打 ASCII：明文 HTTP 请求直接现形",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "ss -uanp | grep 1701",
+        "n": "确认本机是否也在跑 L2TP，注入目标先找准",
+        "s": "《系统》Linux.md · ss"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetUDPEndpoint | Where-Object LocalPort -eq 1701 | Format-Table LocalAddress,OwningProcess",
+        "n": "本机 1701 端点：可疑进程占用就是被拿来当跳板",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetAdapter | Format-Table Name,Status",
+        "n": "隧道适配器 Up 但流量异常，说明载荷被注入了",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -ano -p UDP | findstr :1701",
+        "n": "看 1701 的对端地址与 PID，定位异常连接",
+        "s": "《系统》Windows CMD.md · netstat"
+       },
+       {
+        "c": "netsh interface ipv4 show interfaces",
+        "n": "隧道虚拟接口的收发计数是否出现无法解释的增量",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    },
+    {
+     "name": "伪造 StopCCN 拆隧道",
+     "steps": [
+      {
+       "who": "攻击者 A",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "枚举 Tunnel ID",
+       "hl": [
+        "Tunnel ID",
+        "AVP: Assigned Tunnel ID"
+       ],
+       "vals": {
+        "Tunnel ID": "16 位，从 1 扫到 65535",
+        "AVP: Assigned Tunnel ID": "42（抓包或盲扫得到）"
+       },
+       "say": "Tunnel ID 只有 16 位，抓一次或盲扫就能拿到有效值。",
+       "sub": "命中一个 ID 就打掉一整条隧道。",
+       "evil": true
+      },
+      {
+       "who": "攻击者 A",
+       "to": "LAC",
+       "pkt": 2,
+       "bubble": "StopCCN",
+       "hl": [
+        "Flags + Version",
+        "Tunnel ID",
+        "Session ID",
+        "AVP: Message Type",
+        "AVP: Result Code"
+       ],
+       "vals": {
+        "Flags + Version": "0xC8 0x02（控制消息）",
+        "Tunnel ID": "0x002a = 42（命中隧道）",
+        "Session ID": "0x0000",
+        "AVP: Message Type": "4 = StopCCN",
+        "AVP: Result Code": "1 = General error"
+       },
+       "say": "发一条 36 字节的 StopCCN：Tunnel ID 写 42，Session ID 填 0。",
+       "sub": "没有认证，LAC 只认 ID 不认人。",
+       "evil": true
+      },
+      {
+       "who": "LAC",
+       "to": "攻击者 A",
+       "pkt": 2,
+       "bubble": "回确认并清理",
+       "hl": [
+        "Ns",
+        "Nr",
+        "AVP: Message Type"
+       ],
+       "vals": {
+        "Ns": "发送方当前序号",
+        "Nr": "已收到的序号",
+        "AVP: Message Type": "4 = StopCCN（回执）"
+       },
+       "say": "LAC 回一条 StopCCN 确认，然后清理隧道状态与全部会话。",
+       "sub": "复用这条隧道上的所有用户同时掉线。"
+      },
+      {
+       "who": "攻击者 A",
+       "to": "LAC",
+       "pkt": 2,
+       "bubble": "批量打击",
+       "hl": [
+        "Tunnel ID",
+        "AVP: Result Code"
+       ],
+       "vals": {
+        "Tunnel ID": "换下一个号再发一遍",
+        "AVP: Result Code": "1（随便填，反正没人校验）"
+       },
+       "say": "对整段 ID 空间循环发送，一次能打掉一批接入服务器上的隧道。",
+       "sub": "控制消息解析开销大，DoS 成本极低。",
+       "evil": true
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any -X -c 5 'udp port 1701 and udp[8] & 0x80 != 0'",
+        "n": "控制报文全在眼前：AVP Message Type=4 就是 StopCCN",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "ss -uanp | grep 1701",
+        "n": "隧道进程是否还在，被拆后会退出",
+        "s": "《系统》Linux.md · ss"
+       },
+       {
+        "c": "sudo timeout 10 tcpdump -ni any 'udp port 1701' | wc -l",
+        "n": "10 秒内的 1701 报文数：突然归零说明隧道被拆",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetUDPEndpoint | Where-Object LocalPort -eq 1701 | Format-Table LocalAddress,LocalPort",
+        "n": "端点消失 = 隧道进程已经退出",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetAdapter | Format-Table Name,Status",
+        "n": "L2TP 适配器变成 Disconnected 的时刻就是被拆的时刻",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -ano -p UDP | findstr :1701",
+        "n": "复核 1701 是否还在，配合事件日志定位拆隧道的时间",
+        "s": "《系统》Windows CMD.md · netstat"
+       },
+       {
+        "c": "ipconfig /all",
+        "n": "隧道断开后地址与 DNS 会随之消失",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "ESP 把整条隧道包起来，1701 只对已知对端开放，ID 随机化 + Length 校验",
+   "lead": "L2TP 本身给不了安全，必须在它外面加一层。加完再重放同一场注入与拆隧道。",
+   "scenes": [
+    {
+     "name": "L2TP over IPsec + 白名单 + ID 随机化",
+     "steps": [
+      {
+       "who": "LAC",
+       "to": "LNS",
+       "pkt": 1,
+       "bubble": "ESP 封装",
+       "hl": [
+        "Flags + Version",
+        "Length",
+        "Tunnel ID"
+       ],
+       "vals": {
+        "Flags + Version": "外层已是 ESP，抓包看不到 L2TP 头",
+        "Length": "ESP 载荷里才是原来的 L2TP 报文",
+        "Tunnel ID": "加密后不可见，注入无从下手"
+       },
+       "say": "L2TP over IPsec：整个 L2TP/UDP 报文被 ESP 加密并认证。",
+       "sub": "抓包只剩 ESP，隧道号与会话号都看不见了。"
+      },
+      {
+       "who": "防火墙",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "白名单 + 限速",
+       "hl": [
+        "Tunnel ID",
+        "AVP: Message Type"
+       ],
+       "vals": {
+        "Tunnel ID": "只接受已知 LAC 地址发来的 1701",
+        "AVP: Message Type": "SCCRQ/StopCCN 单独限速并告警"
+       },
+       "say": "1701/UDP 只对已知 LAC 的 IP 放行，控制消息另做速率限制。",
+       "sub": "源 IP 可伪造，所以还必须有 IPsec 兜底。"
+      },
+      {
+       "who": "LNS",
+       "to": "LAC",
+       "pkt": 0,
+       "bubble": "ID 随机化",
+       "hl": [
+        "AVP: Assigned Tunnel ID",
+        "AVP: Receive Window Size"
+       ],
+       "vals": {
+        "AVP: Assigned Tunnel ID": "用随机数生成，不用递增",
+        "AVP: Receive Window Size": "8（窗口有限，便于限速与审计）"
+       },
+       "say": "Tunnel/Session ID 用密码学随机数生成，并严格校验 Length 与 AVP 长度。",
+       "sub": "16 位空间熵不足，随机化只能提高盲注成本。"
+      },
+      {
+       "who": "LAC",
+       "to": "LNS",
+       "pkt": 0,
+       "bubble": "AVP 认证 + H 位",
+       "hl": [
+        "AVP: Message Type",
+        "AVP: Host Name"
+       ],
+       "vals": {
+        "AVP: Message Type": "用 Challenge/Challenge-Response AVP 做共享密钥认证",
+        "AVP: Host Name": "敏感 AVP 置 H 位混淆其值"
+       },
+       "say": "控制通道用 Challenge AVP 做双向认证，敏感 AVP 置 H 位隐藏。",
+       "sub": "H 位是混淆不是加密，抓包者仍可离线尝试。"
+      },
+      {
+       "who": "LNS",
+       "to": "LAC",
+       "pkt": 1,
+       "bubble": "复测",
+       "hl": [
+        "Tunnel ID",
+        "Session ID",
+        "PPP Protocol"
+       ],
+       "vals": {
+        "Tunnel ID": "解密后与本地表项一致才接收",
+        "Session ID": "会话照常转发，业务不中断",
+        "PPP Protocol": "0x0021 正常"
+       },
+       "say": "防护后复测：合法隧道的数据报文照常转发，伪造的进不来。",
+       "sub": "加密只保护管道，端点被控时仍然无效。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo ip xfrm state",
+        "n": "IPsec 的 SA 列表：有 SA 且算法非空，说明隧道被 ESP 保护",
+        "s": "补充（ip xfrm，vault 未收录）"
+       },
+       {
+        "c": "sudo tcpdump -ni any -c 5 'esp'",
+        "n": "抓到的应是 ESP（协议号 50）而不是 UDP 1701，这是加密生效的直接证据",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo iptables -L INPUT -n --line-numbers | grep 1701",
+        "n": "复核 1701 的放行规则是否已收敛到已知对端",
+        "s": "补充（iptables，vault 未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPsecQuickModeSA | Format-Table LocalAddress,RemoteAddress,EncryptionAlgorithm",
+        "n": "快速模式 SA 的加密算法（需管理员）：非空即加密生效",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       },
+       {
+        "c": "Get-NetIPsecMainModeSA | Format-Table LocalAddress,RemoteAddress",
+        "n": "主模式 SA（需管理员）：对端身份认证是否已建立",
+        "s": "《系统》PowerShell.md · 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall firewall show rule name=all | findstr /i 1701",
+        "n": "Windows 防火墙里与 1701 相关的规则，确认只对特定地址放行",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "netstat -ano -p UDP | findstr :1701",
+        "n": "复核 1701 仍在监听且对端受限",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

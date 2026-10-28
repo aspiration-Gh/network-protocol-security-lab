@@ -1,0 +1,604 @@
+{
+ "id": "ipv6",
+ "notes": {
+  "Flow Label": {
+   "short": "20 位流标签，给流分类用",
+   "more": "与源/目的地址一起标识一条「流」，让中间设备不必拆传输层首部就能做负载分担与 QoS。它不是安全字段，随机取值还能防止被用来做设备指纹。",
+   "sec": "取值是否随机，能反推对端操作系统的实现特征。"
+  },
+  "Hop Limit": {
+   "short": "跳数上限，等价 IPv4 的 TTL",
+   "more": "8 位，每经一台路由器减 1，减到 0 丢弃并回 ICMPv6 超时。NDP 报文要求它必须是 255，接收端据此判断对方是否同链路。",
+   "sec": "RA/NS 的跳数限制不是 255 就该丢——这是防伪造的第一道硬检查。"
+  },
+  "Fragment Next Header": {
+   "short": "分片头之后是什么协议",
+   "more": "8 位，位于 8 字节分片扩展首部内，指出重组完成后该把数据交给谁（6 TCP、17 UDP、58 ICMPv6）。它在第一个分片里可见，在后续分片里意义相同。",
+   "sec": "把真实上层协议藏在第二个分片，是绕过端口检测的经典手法。"
+  },
+  "Fragment Offset / Res / M": {
+   "short": "偏移 13 位 + M 标志",
+   "more": "偏移单位仍是 8 字节，M=1 表示后面还有分片。IPv6 只允许源主机分片，中途路由器遇到超 MTU 只回「包太大」，所以这里不会出现路由器切出来的片。",
+   "sec": "重叠偏移与「首片不含上层首部」是绕过检测的两个抓手。"
+  },
+  "Cur Hop Limit": {
+   "short": "RA 建议主机用的默认跳数",
+   "more": "8 位，路由器通告里告诉主机：发出的报文默认把跳数限制设成多少（常见 64）。主机据此更新自己接口的默认值。",
+   "sec": "伪造 RA 可以顺手把这个值改小，让受害者的流量提前被丢弃。"
+  },
+  "Router Lifetime": {
+   "short": "这台路由器能当网关多久",
+   "more": "16 位，单位秒。非 0 表示可以当默认网关，0 表示只是通告前缀、不要当网关。主机按它维护默认路由的生存期。",
+   "sec": "填一个很大的值，伪造的网关就能长期占据默认路由。"
+  },
+  "Option: SLLA": {
+   "short": "源链路层地址选项",
+   "more": "NDP 报文的选项字段，类型 1、长度 1（单位 8 字节），携带发送方的 6 字节 MAC。接收端用它更新邻居缓存，省掉一次额外解析。",
+   "sec": "这个选项就是 NDP 版的「我是这个 MAC」，伪造它等于伪造邻居。"
+  },
+  "L / A Flags": {
+   "short": "L 上链路 / A 自动配置",
+   "more": "前缀信息选项里的两位：L=1 表示该前缀可用于判断同链路，A=1 表示主机可据此前缀用无状态方式自动配置地址（SLAAC）。",
+   "sec": "A=1 的伪造前缀会让主机自动配出一个攻击者网段的地址。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "40 字节定长首部 + 一条可无限接长的扩展首部链",
+   "lead": "IPv6 把可选功能从首部里搬到了链上：路由器不再解析，转发更快，但链上的内容也没人看。地址解析改由 NDP 在组播上完成。",
+   "scenes": [
+    {
+     "name": "定长首部 → 扩展首部链 → 分片 → RA",
+     "steps": [
+      {
+       "who": "主机A",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "IPv6 基本首部 40 字节",
+       "hl": [
+        "Version",
+        "Payload Length",
+        "Next Header",
+        "Hop Limit"
+       ],
+       "vals": {
+        "Version": "6",
+        "Payload Length": "20",
+        "Next Header": "6（TCP）",
+        "Hop Limit": "64"
+       },
+       "say": "首部定长四十字节：没有校验和、没有 IHL、也没有分片字段。",
+       "sub": "字段少、偏移固定，路由器流水线更容易做深。"
+      },
+      {
+       "who": "主机A",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "128 位地址 + 流标签",
+       "hl": [
+        "Source Address",
+        "Destination Address",
+        "Flow Label"
+       ],
+       "vals": {
+        "Source Address": "2001:db8::1",
+        "Destination Address": "2001:db8::2",
+        "Flow Label": "0x12345"
+       },
+       "say": "地址各 128 位；流标签让中间设备不拆传输层就能给流分类。",
+       "sub": "可选功能没有消失，只是被推到扩展首部链上。"
+      },
+      {
+       "who": "网关R1",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "下一个首部 = 44（分片）",
+       "hl": [
+        "Next Header",
+        "Hop Limit",
+        "Source Address"
+       ],
+       "vals": {
+        "Next Header": "44（分片扩展首部）",
+        "Hop Limit": "63",
+        "Source Address": "2001:db8::a"
+       },
+       "say": "装不下就挂一节分片首部：下一个首部 44，之后才轮到 UDP。",
+       "sub": "除逐跳选项外，路由器一律不处理扩展首部。"
+      },
+      {
+       "who": "主机A",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "首片：offset=0 M=1",
+       "hl": [
+        "Fragment Offset / Res / M",
+        "Identification",
+        "Fragment Next Header",
+        "UDP Destination Port"
+       ],
+       "vals": {
+        "Fragment Offset / Res / M": "offset=0, M=1",
+        "Identification": "0xdeadbeef",
+        "Fragment Next Header": "17（UDP）",
+        "UDP Destination Port": "5001"
+       },
+       "say": "分片只由源主机做；路由器超 MTU 只回 ICMPv6「包太大」。",
+       "sub": "少了一整类「路由器切出畸形片」的攻击面。"
+      },
+      {
+       "who": "网关R1",
+       "to": "主机A",
+       "pkt": 2,
+       "bubble": "RA 类型 134：默认网关与前缀",
+       "hl": [
+        "Type",
+        "Cur Hop Limit",
+        "Router Lifetime",
+        "Option: SLLA",
+        "Prefix Length"
+       ],
+       "vals": {
+        "Type": "134（路由通告）",
+        "Cur Hop Limit": "64",
+        "Router Lifetime": "1800",
+        "Option: SLLA": "00:1a:2b:3c:4d:5e",
+        "Prefix Length": "64"
+       },
+       "say": "地址从哪来靠 RA：默认网关、前缀与跳数限制全塞在这条报文里。",
+       "sub": "IPv6 没有广播也没有 ARP，地址解析改由组播上的 NS/NA 完成。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ip -6 route get 2001:db8::2",
+        "n": "看这条 v6 目的走哪个接口、源地址选成什么（含是否经隧道）",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "ip -6 addr show scope global",
+        "n": "确认接口上的 v6 地址与前缀长度，判断是不是 SLAAC 自动配出来的",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "ping -6 -c 3 2001:db8::2",
+        "n": "IPv6 下的 ping 走 ICMPv6（类型 128/129），与 v4 不是同一套类型",
+        "s": "《系统》Linux.md · ping"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection 2001:db8::2 -InformationLevel Detailed",
+        "n": "本机到 v6 目标的连通性与源地址，能区分「没路由」和「被过滤」",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh int ipv6 show neighbors",
+        "n": "v6 邻居表：NS/NA 解析出来的链路层地址都在这里",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "netsh int ipv6 show route",
+        "n": "v6 路由表，默认路由 ::/0 的下一跳就是 RA 给的网关",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "RA/NA 无认证可伪造，分片头能把上层首部藏到第二片",
+   "lead": "两条路：一条改主机的路由与邻居缓存（NDP），一条骗过边界的解析器（分片首部）。都不需要攻破任何设备。",
+   "scenes": [
+    {
+     "name": "NDP 欺骗：一条 RA 换掉默认网关",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "主机A",
+       "pkt": 2,
+       "bubble": "伪造 RA｜生存期 9000 秒",
+       "evil": true,
+       "hl": [
+        "Type",
+        "Cur Hop Limit",
+        "Router Lifetime",
+        "Option: SLLA",
+        "Prefix Length"
+       ],
+       "vals": {
+        "Type": "134（路由通告）",
+        "Cur Hop Limit": "64",
+        "Router Lifetime": "9000",
+        "Option: SLLA": "aa:bb:cc:dd:ee:ff（攻击者）",
+        "Prefix Length": "64"
+       },
+       "say": "一条伪造 RA 就把默认网关换掉：生存期填 9000 秒，能占很久。",
+       "sub": "源地址必须是链路本地、跳数限制必须 255，伪造者也照做。"
+      },
+      {
+       "who": "主机A",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "写进默认路由与前缀表",
+       "hl": [
+        "Router Lifetime",
+        "L / A Flags",
+        "Prefix Length"
+       ],
+       "vals": {
+        "Router Lifetime": "9000",
+        "L / A Flags": "L=1, A=1（自动配地址）",
+        "Prefix Length": "64"
+       },
+       "say": "主机把攻击者记成默认网关，还按 A 标志自动配了个假前缀地址。",
+       "sub": "主机侧没有任何告警，路由表看着完全正常。"
+      },
+      {
+       "who": "主机A",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "出网报文改投攻击者",
+       "hl": [
+        "Destination Address",
+        "Hop Limit",
+        "Next Header"
+       ],
+       "vals": {
+        "Destination Address": "2001:db8:bad::1（攻击者）",
+        "Hop Limit": "64",
+        "Next Header": "6（TCP）"
+       },
+       "say": "出网报文全改投攻击者，主机主观上认为一切正常。",
+       "sub": "只多一跳时延，业务不断，最难被发现。"
+      },
+      {
+       "who": "攻击者",
+       "to": "原网关",
+       "pkt": 0,
+       "bubble": "可转发、可篡改、可丢弃",
+       "hl": [
+        "Source Address",
+        "Destination Address"
+       ],
+       "vals": {
+        "Source Address": "保留原始源地址",
+        "Destination Address": "真实网关"
+       },
+       "say": "攻击者可以选择转发、篡改或直接丢弃，断了排查先怀疑上游。",
+       "sub": "不转发就是针对整段子网的断网。"
+      },
+      {
+       "who": "攻击者",
+       "to": "主机A",
+       "pkt": 2,
+       "bubble": "再补一条伪造 NA",
+       "evil": true,
+       "hl": [
+        "Option: SLLA",
+        "SLLA Address"
+       ],
+       "vals": {
+        "Option: SLLA": "类型 1：目标链路层地址",
+        "SLLA Address": "aa:bb:cc:dd:ee:ff（冒充原网关）"
+       },
+       "say": "再补一条伪造邻居通告改邻居缓存，连同网段就近访问也一起劫走。",
+       "sub": "RA 管路由，NA 管邻居，两条报文各关一扇门。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ip -6 neigh show",
+        "n": "邻居缓存里网关的 MAC 是否变成陌生地址，NDP 欺骗的直接证据",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'icmp6 and ip6[40] == 134'",
+        "n": "抓所有 RA：本不该发 RA 的地址发出来的就是伪造",
+        "s": "补充（vault 无 tcpdump，NDP 取证必备）"
+       },
+       {
+        "c": "ip -6 route show default",
+        "n": "默认路由的下一跳与生存期：被伪造 RA 换掉时这里换人",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv6 | Select IPAddress,PrefixLength,InterfaceAlias",
+        "n": "是否多出一个攻击者网段的前缀地址（说明 A 标志被利用）",
+        "s": "《系统》PowerShell.md · Get-NetIPAddress"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh int ipv6 show neighbors",
+        "n": "核对网关的链路层地址是否还是预期值",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "netsh int ipv6 show route",
+        "n": "默认路由 ::/0 的下一跳被换掉，是最直观的劫持证据",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    },
+    {
+     "name": "分片首部绕过：把端口藏进第二片",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "边界防火墙",
+       "pkt": 1,
+       "bubble": "首片｜offset=0 M=1，只放 8 字节",
+       "evil": true,
+       "hl": [
+        "Next Header",
+        "Fragment Offset / Res / M",
+        "Payload Length",
+        "Fragment Data"
+       ],
+       "vals": {
+        "Next Header": "44（分片）",
+        "Fragment Offset / Res / M": "offset=0, M=1",
+        "Payload Length": "24",
+        "Fragment Data": "8 字节无害数据"
+       },
+       "say": "首片里没有任何传输层首部，检测设备拿不到端口与标志。",
+       "sub": "只能看到「下一个首部 44」，剩下全是不可解析的字节。"
+      },
+      {
+       "who": "边界防火墙",
+       "to": "内网主机",
+       "pkt": 1,
+       "bubble": "按「未知上层」放行",
+       "hl": [
+        "Next Header",
+        "Hop Limit"
+       ],
+       "vals": {
+        "Next Header": "44 → 解析不出上层",
+        "Hop Limit": "64"
+       },
+       "say": "设备对解析不出上层的片段常选择放行，只记一条协议号 44。",
+       "sub": "策略里没有这一条，日志里也没有端口可写。"
+      },
+      {
+       "who": "攻击者",
+       "to": "内网主机",
+       "pkt": 1,
+       "bubble": "第二片｜offset=1 M=0",
+       "evil": true,
+       "hl": [
+        "Fragment Offset / Res / M",
+        "Fragment Next Header",
+        "UDP Destination Port"
+       ],
+       "vals": {
+        "Fragment Offset / Res / M": "offset=1（第 8 字节）, M=0",
+        "Fragment Next Header": "17（UDP）",
+        "UDP Destination Port": "5001"
+       },
+       "say": "第二片才从 UDP 首部开始，端口 5001 与整个请求都藏在这一片。",
+       "sub": "偏移单位仍是 8 字节，正好错开首片放数据的位置。"
+      },
+      {
+       "who": "内网主机",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "重组出完整 UDP 报文",
+       "hl": [
+        "Fragment Offset / Res / M",
+        "Identification",
+        "UDP Length"
+       ],
+       "vals": {
+        "Fragment Offset / Res / M": "offset=0 + offset=1 拼接",
+        "Identification": "0xdeadbeef",
+        "UDP Length": "24（含 8 字节首部）"
+       },
+       "say": "重组后得到完整 UDP 报文交给 5001，防火墙全程没见过端口。",
+       "sub": "检测点与终点看到的不是同一份数据，策略形同虚设。"
+      },
+      {
+       "who": "攻击者",
+       "to": "内网主机",
+       "pkt": 1,
+       "bubble": "再叠重叠偏移",
+       "evil": true,
+       "hl": [
+        "Fragment Offset / Res / M",
+        "Identification"
+       ],
+       "vals": {
+        "Fragment Offset / Res / M": "重叠偏移",
+        "Identification": "0xdeadbeef 同组"
+       },
+       "say": "再用重叠偏移，让检测端与主机重组出不同内容，绕开 IDS。",
+       "sub": "不同实现对重叠片的处理差异，正是 evasion 的空间。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any 'ip6[6] == 44'",
+        "n": "只看下一个首部为 44 的报文，把所有分片单独列出来",
+        "s": "补充（vault 无 tcpdump，分片取证必备）"
+       },
+       {
+        "c": "sudo nft list ruleset | grep -i frag",
+        "n": "查本机规则集里有没有针对分片头的丢弃或重组策略",
+        "s": "补充（nftables，vault 无）"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'ip6[6] == 44 and ip6[44+2:2] & 0x1fff != 0'",
+        "n": "只抓偏移非 0 的分片：首片看不到端口时，这些就是被藏起来的部分",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetFirewallRule | Where-Object DisplayName -like '*IPv6*' | Select-Object DisplayName,Enabled",
+        "n": "核对 v6 相关规则是否只按端口匹配（分片绕过正是钻这个空子）",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall firewall show rule name=all | findstr /i ipv6",
+        "n": "列出 v6 规则，看有没有基于端口、却忽略分片的条目",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "接入侧管住谁能发 RA/NA，边界只放行白名单首部并先重组",
+   "lead": "防守点很明确：NDP 要在接入交换机上按端口角色拦，扩展首部要在边界按类型与链深管，废弃的 RH0 直接丢。",
+   "scenes": [
+    {
+     "name": "RA Guard + 首部白名单 + 先重组后检测",
+     "steps": [
+      {
+       "who": "接入交换机",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "RA Guard：用户口禁发 RA",
+       "hl": [
+        "Type",
+        "Option: SLLA"
+       ],
+       "vals": {
+        "Type": "134 → 用户端口来的直接丢",
+        "Option: SLLA": "必须与端口绑定表一致"
+       },
+       "say": "RA Guard：用户接入口只准发 NS/NA，任何 RA 一律丢，伪造网关失效。",
+       "sub": "再配合 ND Inspection 校验 NA 的源链路层地址。"
+      },
+      {
+       "who": "主机A",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "默认网关只能来自信任端口",
+       "hl": [
+        "Router Lifetime",
+        "Prefix Length",
+        "L / A Flags"
+       ],
+       "vals": {
+        "Router Lifetime": "始终是 1800",
+        "Prefix Length": "64",
+        "L / A Flags": "L=1, A=1"
+       },
+       "say": "攻击者的 RA 连缓存都进不去，默认路由与前缀表保持原样。",
+       "sub": "更彻底的是 SEND：用 CGA 与签名给 NDP 加认证。"
+      },
+      {
+       "who": "边界防火墙",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "扩展首部白名单",
+       "hl": [
+        "Next Header",
+        "Fragment Next Header"
+       ],
+       "vals": {
+        "Next Header": "44 不在白名单 → 丢弃",
+        "Fragment Next Header": "不放行未知链"
+       },
+       "say": "只放行业务确实需要的扩展首部类型，分片头与未知链直接丢。",
+       "sub": "链上重复出现或深度超阈值同样丢弃。"
+      },
+      {
+       "who": "边界防火墙",
+       "to": "内网主机",
+       "pkt": 1,
+       "bubble": "必须放行的先重组再检测",
+       "hl": [
+        "Fragment Offset / Res / M",
+        "Identification"
+       ],
+       "vals": {
+        "Fragment Offset / Res / M": "重组后再取端口",
+        "Identification": "0xdeadbeef 整组"
+       },
+       "say": "必须放行的分片先重组，拿到端口与标志后再匹配策略。",
+       "sub": "检测点必须和终点看到同一份数据，否则永远慢一步。"
+      },
+      {
+       "who": "边界防火墙",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "RH0 已废弃，见到即丢",
+       "hl": [
+        "Next Header",
+        "Source Address"
+       ],
+       "vals": {
+        "Next Header": "43（路由头）且 type=0 → 丢弃",
+        "Source Address": "2001:db8::66"
+       },
+       "say": "按 RFC 5095 丢掉 type 0 路由头，靠中转列表放大与绕行的路被掐断。",
+       "sub": "只保留移动 IPv6 等明确需要的类型，并校验中转节点数。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sysctl net.ipv6.conf.all.accept_ra net.ipv6.conf.all.forwarding",
+        "n": "accept_ra=0 表示主机不接受 RA；转发开启时内核也会忽略 RA",
+        "s": "补充（vault 无 accept_ra 小节）"
+       },
+       {
+        "c": "ip -6 neigh show nud all",
+        "n": "含各种状态的全量邻居表，定期与基线比对可发现被改写",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'ip6[6] == 43 or ip6[6] == 44'",
+        "n": "确认路由头与分片头已被边界丢弃：这里不该再看到它们",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv6 | Select IPAddress,PrefixLength,InterfaceAlias",
+        "n": "检查是否凭空多出攻击者网段的前缀地址",
+        "s": "《系统》PowerShell.md · Get-NetIPAddress"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh int ipv6 show neighbors",
+        "n": "巡检网关的链路层地址；被 NA 欺骗时这里最先变化",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "netsh interface ipv6 show subinterfaces",
+        "n": "看接口 MTU，MTU 设置得当能减少分片需求",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

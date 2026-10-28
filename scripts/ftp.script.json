@@ -1,0 +1,535 @@
+{
+ "id": "ftp",
+ "notes": {
+  "Argument": {
+   "short": "用户名明文，可直接枚举账户",
+   "more": "USER 命令后面的账户名以 NVT-ASCII 明文出现，服务器据此查本地账户表；回 331 说明账户存在、在等口令，回 530 说明不存在或已被拒绝。",
+   "sec": "明文用户名让攻击者能区分「账户不存在」与「口令错」，撞库省掉一半试错成本。"
+  },
+  "Host Address": {
+   "short": "PORT 里的目标地址，可填任何人",
+   "more": "四个十进字段拼成 32 位 IPv4 地址，RFC 959 没有要求它等于控制连接的源地址，服务器照填照连，于是成为反弹扫描的原语。",
+   "sec": "只校验参数格式不校验归属，等于把服务器的出向连接权交给了客户端。"
+  },
+  "Type Code": {
+   "short": "A 改行结束，I 原样过字节",
+   "more": "TYPE A 把行结束统一成 CRLF，接收方再转回本地格式；TYPE I 把数据当连续比特装进 8 位传输字节，不做任何转换，传二进制必须用它。",
+   "sec": "选错类型会静默改坏文件：长度与哈希全变，会话却照样显示传输成功。"
+  },
+  "Pasv Argument": {
+   "short": "227 里的地址端口，可被中间人改",
+   "more": "与 PORT 命令同样的 6 数字格式，给出服务器正在监听的地址与临时端口；客户端据此主动连出，这段数字就是数据连接的去向。",
+   "sec": "中间人把它换成自己的地址，文件就流向攻击者，而控制连接看不出任何异常。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "登录、定类型、选模式：两条连接各管一件事",
+   "lead": "先看一次完整会话。注意口令在哪一行、以什么形式出现——它决定后面两幕的全部。",
+   "scenes": [
+    {
+     "name": "从登录到传文件",
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "FTP 服务器",
+       "pkt": 0,
+       "bubble": "USER admin",
+       "hl": [
+        "Command",
+        "Argument"
+       ],
+       "vals": {
+        "Command": "USER",
+        "Argument": "admin"
+       },
+       "say": "控制连接连 21，第一行就是命令加账户名，纯文本可读。",
+       "sub": "服务器据此查账户表，回 331 要口令或 530 拒绝。"
+      },
+      {
+       "who": "客户端",
+       "to": "FTP 服务器",
+       "pkt": 0,
+       "bubble": "PASS P@ssw0rd",
+       "hl": [
+        "Command",
+        "Argument"
+       ],
+       "vals": {
+        "Command": "PASS",
+        "Argument": "P@ssw0rd"
+       },
+       "say": "紧接着在同一条连接上发口令，回 230 即登录成功。",
+       "sub": "口令没有散列、没有挑战应答，就是原样一行字节。"
+      },
+      {
+       "who": "客户端",
+       "to": "FTP 服务器",
+       "pkt": 1,
+       "bubble": "TYPE I",
+       "hl": [
+        "Command",
+        "Type Code"
+       ],
+       "vals": {
+        "Command": "TYPE",
+        "Type Code": "I（二进制）"
+       },
+       "say": "传文件前先定类型：二进制必须用 I，否则字节会被改写。",
+       "sub": "类型协商没有完整性校验，改一个字母对端就解错。"
+      },
+      {
+       "who": "客户端",
+       "to": "FTP 服务器",
+       "pkt": 2,
+       "bubble": "PORT ...",
+       "hl": [
+        "Command",
+        "Host Address",
+        "Port High",
+        "Port Low"
+       ],
+       "vals": {
+        "Command": "PORT",
+        "Host Address": "192.168.1.2（自己）",
+        "Port High": "19",
+        "Port Low": "137"
+       },
+       "say": "主动模式把地址与端口编码成 6 个数字，端口 = 19×256+137 = 5001。",
+       "sub": "服务器收到后从自己的 20 端口主动连回这个地址。"
+      },
+      {
+       "who": "FTP 服务器",
+       "to": "客户端",
+       "pkt": 3,
+       "bubble": "227 Entering Passive",
+       "hl": [
+        "Reply Code",
+        "Pasv Argument"
+       ],
+       "vals": {
+        "Reply Code": "227",
+        "Pasv Argument": "(192,168,1,10,195,80)"
+       },
+       "say": "被动模式反过来：服务器在 227 里给出临时端口，客户端连出。",
+       "sub": "195×256+80 = 50000，方向与防火墙策略一致，成了默认。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ftp -v 192.0.2.10",
+        "n": "登录后在提示符下执行 debug，能看到 USER/PASS 与三位应答码",
+        "s": "补充（ftp 客户端，仓库未收录）"
+       },
+       {
+        "c": "ftp -p 192.0.2.10",
+        "n": "-p 直接进被动模式，避免主动模式被防火墙拦",
+        "s": "补充（ftp 客户端，仓库未收录）"
+       },
+       {
+        "c": "ss -tnie '( dport = :21 or sport = :21 )'",
+        "n": "看控制连接的收发队列与重传；数据连接是另一条独立 TCP 流",
+        "s": "补充（ss 套接字统计，仓库未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection 192.0.2.10 -Port 21",
+        "n": "测 21 端口，TcpTestSucceeded 为 True 才谈得上建控制连接",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -ano | findstr :21",
+        "n": "看本机与 21 端口的连接状态和占用进程 PID",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "明文信道加上可自选连接目标，两个缺口各能打穿一次会话",
+   "lead": "两个攻击都不需要破解什么：一个只靠听，一个只靠一条 PORT 命令。",
+   "scenes": [
+    {
+     "name": "明文口令嗅探",
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "FTP 服务器",
+       "pkt": 0,
+       "bubble": "USER admin",
+       "hl": [
+        "Command",
+        "Argument"
+       ],
+       "vals": {
+        "Command": "USER",
+        "Argument": "admin"
+       },
+       "say": "受害者照常登录，控制连接没有任何加密层。",
+       "sub": "命令与参数都是 NVT-ASCII 文本行，一字节不差地送上链路。"
+      },
+      {
+       "who": "客户端",
+       "to": "FTP 服务器",
+       "pkt": 0,
+       "bubble": "PASS P@ssw0rd",
+       "hl": [
+        "Argument"
+       ],
+       "vals": {
+        "Argument": "P@ssw0rd"
+       },
+       "say": "口令同样以明文出现在 TCP 载荷里，一行一个回车。",
+       "sub": "没有散列也没有挑战应答，抓到就是原文。"
+      },
+      {
+       "who": "攻击者",
+       "to": "接入交换机",
+       "pkt": 0,
+       "bubble": "镜像口抓包",
+       "evil": true,
+       "hl": [
+        "Command",
+        "Argument"
+       ],
+       "vals": {
+        "Command": "tcp port 21",
+        "Argument": "PASS P@ssw0rd"
+       },
+       "say": "同广播域或镜像口抓包，凭据零成本到手。",
+       "sub": "tcpdump -A 直接把载荷按 ASCII 打出来。"
+      },
+      {
+       "who": "攻击者",
+       "to": "FTP 服务器",
+       "pkt": 0,
+       "bubble": "同一凭据登录",
+       "evil": true,
+       "hl": [
+        "Command",
+        "Argument"
+       ],
+       "vals": {
+        "Command": "USER admin",
+        "Argument": "admin"
+       },
+       "say": "攻击者换一台机器重放这组凭据，服务器回 230。",
+       "sub": "日志里只是一次正常登录，看不出两个人。"
+      },
+      {
+       "who": "攻击者",
+       "to": "FTP 服务器",
+       "pkt": 2,
+       "bubble": "RETR / STOR",
+       "evil": true,
+       "hl": [
+        "Command"
+       ],
+       "vals": {
+        "Command": "RETR 或 STOR"
+       },
+       "say": "拿到的权限与受害者完全相同，读文件、投文件都做得到。",
+       "sub": "问题不在权限模型，在信道本身。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -i eth0 -A -s0 'tcp port 21'",
+        "n": "-A 按 ASCII 打印载荷，USER/PASS 两行口令直接可读",
+        "s": "补充（tcpdump，仓库未收录）"
+       },
+       {
+        "c": "ss -tn state established '( dport = :21 or sport = :21 )'",
+        "n": "先确认有活跃的 21 连接，再对着这条流抓包",
+        "s": "补充（ss 套接字统计，仓库未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetTCPConnection -RemotePort 21",
+        "n": "列出本机到 21 端口的连接与所属进程",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -an | findstr :21",
+        "n": "确认 21 连接存在并看对端地址",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    },
+    {
+     "name": "PORT 反弹扫描",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "FTP 服务器",
+       "pkt": 0,
+       "bubble": "USER anonymous",
+       "evil": true,
+       "hl": [
+        "Command",
+        "Argument"
+       ],
+       "vals": {
+        "Command": "USER anonymous",
+        "Argument": "anonymous"
+       },
+       "say": "先拿一个能发 PORT 的会话，匿名账号就够。",
+       "sub": "回 230 之后这条控制连接就是免费的出向跳板。"
+      },
+      {
+       "who": "攻击者",
+       "to": "FTP 服务器",
+       "pkt": 2,
+       "bubble": "PORT 203,0,113,9,0,80",
+       "evil": true,
+       "hl": [
+        "Command",
+        "Host Address",
+        "Port High",
+        "Port Low"
+       ],
+       "vals": {
+        "Command": "PORT",
+        "Host Address": "203.0.113.9（第三方）",
+        "Port High": "0",
+        "Port Low": "80"
+       },
+       "say": "参数里填的不是自己的地址，而是第三方主机的 80 端口。",
+       "sub": "RFC 959 没要求这个地址等于控制连接的源地址。"
+      },
+      {
+       "who": "FTP 服务器",
+       "to": "攻击者",
+       "pkt": 2,
+       "bubble": "200 PORT successful",
+       "hl": [
+        "Command"
+       ],
+       "vals": {
+        "Command": "200 接受"
+       },
+       "say": "服务器只校验参数格式，照单接受，不做归属检查。",
+       "sub": "一条命令就把服务器的出向连接权交了出去。"
+      },
+      {
+       "who": "攻击者",
+       "to": "FTP 服务器",
+       "pkt": 2,
+       "bubble": "LIST",
+       "evil": true,
+       "hl": [
+        "Command"
+       ],
+       "vals": {
+        "Command": "LIST"
+       },
+       "say": "发一条 LIST 触发数据连接，服务器从 20 端口连向目标。",
+       "sub": "每次换一个端口号，就是一轮扫描。"
+      },
+      {
+       "who": "FTP 服务器",
+       "to": "第三方主机",
+       "pkt": 2,
+       "bubble": "SYN src:20",
+       "hl": [
+        "Host Address",
+        "Port Low"
+       ],
+       "vals": {
+        "Host Address": "203.0.113.9",
+        "Port Low": "80"
+       },
+       "say": "端口开放回 150，被过滤回 425，结果经控制连接告诉攻击者。",
+       "sub": "扫描流量的溯源全部指向这台 FTP 服务器。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ftp -vn 203.0.113.5",
+        "n": "匿名登录后在提示符执行 quote PORT 203,0,113,9,0,80，再 LIST 验证反弹",
+        "s": "补充（ftp 客户端 quote 命令）"
+       },
+       {
+        "c": "curl --ftp-port 203.0.113.9 -s ftp://203.0.113.5/",
+        "n": "用 curl 指定主动模式的目标地址，看服务器是否接受第三方地址",
+        "s": "补充（curl FTP 选项）"
+       },
+       {
+        "c": "sudo tcpdump -ni eth0 'tcp port 20'",
+        "n": "抓服务器 20 端口的出向 SYN，直接看它去连了谁",
+        "s": "补充（tcpdump，仓库未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection 203.0.113.5 -Port 21",
+        "n": "先确认服务器 21 可达，再发 PORT 命令",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -an | findstr :20",
+        "n": "看本机 20 端口有没有意外的入向连接",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "同一场攻击重放一遍，这次在信道上和参数上各设一道闸",
+   "lead": "加密解决「谁能看」，参数校验解决「服务器替谁连」。两道闸互相不替代。",
+   "scenes": [
+    {
+     "name": "FTPS/SFTP 加密 + 禁 PORT",
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "FTP 服务器",
+       "pkt": 0,
+       "bubble": "AUTH TLS",
+       "hl": [
+        "Command"
+       ],
+       "vals": {
+        "Command": "AUTH TLS"
+       },
+       "say": "先升 TLS 再登录：21 端口上发 AUTH TLS，之后整条流加密。",
+       "sub": "显式 FTPS 走 21，隐式 FTPS 直接在 990 上握手。"
+      },
+      {
+       "who": "客户端",
+       "to": "FTP 服务器",
+       "pkt": 0,
+       "bubble": "USER / PASS（密文）",
+       "hl": [
+        "Argument"
+       ],
+       "vals": {
+        "Argument": "加密后不可读"
+       },
+       "say": "用户名与口令都在 TLS 记录里，抓包只剩密文与长度。",
+       "sub": "数据连接也要各自完成一次 TLS 握手。"
+      },
+      {
+       "who": "攻击者",
+       "to": "接入交换机",
+       "pkt": 0,
+       "bubble": "抓包",
+       "evil": true,
+       "hl": [
+        "Argument"
+       ],
+       "vals": {
+        "Argument": "TLS 记录，不可读"
+       },
+       "say": "同样的位置再抓一次，只能看到加密记录的边界。",
+       "sub": "嗅探这条路在第一步就被掐断。"
+      },
+      {
+       "who": "攻击者",
+       "to": "FTP 服务器",
+       "pkt": 2,
+       "bubble": "PORT 203,0,113,9,0,80",
+       "evil": true,
+       "hl": [
+        "Host Address",
+        "Port Low"
+       ],
+       "vals": {
+        "Host Address": "203.0.113.9",
+        "Port Low": "80"
+       },
+       "say": "反弹扫描重放：参数地址与控制连接源地址不一致，直接被拒。",
+       "sub": "服务器回 500，只接受 PASV。"
+      },
+      {
+       "who": "FTP 服务器",
+       "to": "攻击者",
+       "pkt": 2,
+       "bubble": "500 拒绝",
+       "hl": [
+        "Command"
+       ],
+       "vals": {
+        "Command": "500 PORT 参数与源地址不符"
+       },
+       "say": "禁用 PORT 之后，连参数格式这一步都不再解析。",
+       "sub": "数据连接只能由客户端主动连出，跳板消失。"
+      },
+      {
+       "who": "客户端",
+       "to": "FTP 服务器",
+       "pkt": 1,
+       "bubble": "TYPE I",
+       "hl": [
+        "Type Code"
+       ],
+       "vals": {
+        "Type Code": "I"
+       },
+       "say": "再加一条：匿名账号只读、根目录 chroot、上传区不落地执行。",
+       "sub": "加密解决信道，权限收敛解决后果。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sftp user@192.0.2.10",
+        "n": "SFTP 走 22 端口单条加密连接，口令与文件内容都不再明文",
+        "s": "补充（OpenSSH 自带客户端）"
+       },
+       {
+        "c": "openssl s_client -connect 192.0.2.10:21 -starttls ftp",
+        "n": "验证显式 FTPS：能协商出 TLS 并打出证书链才算可用",
+        "s": "补充（openssl，仓库未收录）"
+       },
+       {
+        "c": "grep -Ei '^(anonymous_enable|pasv_enable|port_enable)' /etc/vsftpd.conf",
+        "n": "确认匿名已关或只读、PORT 已禁用，只剩被动模式",
+        "s": "补充（vsftpd 配置项）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetTCPConnection -LocalPort 21 -State Listen",
+        "n": "确认 21 只在必要时监听，且没有异常来源的连接",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall firewall show rule name=all | findstr /i ftp",
+        "n": "看防火墙里 FTP 相关放行规则，确认只对内网开 21",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

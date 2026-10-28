@@ -1,0 +1,581 @@
+{
+ "id": "arp",
+ "notes": {
+  "EtherType": {
+   "short": "帧类型 0x0806 表示 ARP",
+   "more": "以太网帧头 14 字节里的最后 2 字节，0x0806 是 ARP，0x0800 是 IPv4，0x86DD 是 IPv6。交换机靠它决定把载荷交给哪个上层解析。",
+   "sec": "伪造时 EtherType 必须写对，否则接收端根本不进 ARP 处理。"
+  },
+  "Hardware Type": {
+   "short": "硬件类型，以太网为 1",
+   "more": "16 位，0x0001 表示以太网。它和下面的协议类型、两个长度字段一起，说明「用什么地址去解析什么地址」。",
+   "sec": "长度字段被改成非 6/4 时，解析器若不复核就会越界读。"
+  },
+  "Operation": {
+   "short": "1 请求 / 2 应答，无认证位",
+   "more": "16 位操作码，只有请求、应答与 RARP 四种取值。没有序号、没有签名，接收端无法把一条应答和任何请求对应起来。",
+   "sec": "把操作码写成 2，一条「合法应答」就构造完成了。"
+  },
+  "Sender Hardware Address": {
+   "short": "发送方 MAC，可随意填写",
+   "more": "48 位，本应等于帧头源 MAC。交换机只看帧头学转发表，主机只看这里更新缓存——两个平面被分开处理，就产生了伪造空间。",
+   "sec": "帧头写真实网卡保证回程可达，载荷写别人的 MAC 完成冒充。"
+  },
+  "Sender Protocol Address": {
+   "short": "发送方 IP，冒充的落点",
+   "more": "32 位。填谁的地址，接收端就把谁的 IP 映射到发送方 MAC 上。填网关地址就是冒充网关，填内网主机地址就是骗网关。",
+   "sec": "同一 IP 出现多个 MAC，是 ARP 欺骗最直接的判据。"
+  },
+  "Target Hardware Address": {
+   "short": "目标 MAC，请求时全 0",
+   "more": "48 位。请求报文里因为还不知道对方硬件地址，填全 0；应答里填请求方的 MAC。有些实现会直接拿它覆盖缓存。",
+   "sec": "把应答发给广播地址，一次就能覆盖整个广播域。"
+  },
+  "Target Protocol Address": {
+   "short": "被解析的 IP",
+   "more": "32 位，请求时是「我在找谁」的地址，应答时是发起解析的那一方的地址。扫描就是拿它做递增遍历。",
+   "sec": "逐个递增地发请求，几秒就能测绘整个广播域。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "广播问一句、单播答一句，映射写进内存，几分钟后老化",
+   "lead": "ARP 只做一件事：把 IP 换成 MAC。注意它没有序号、没有签名，也没有「这条应答对应哪次请求」的概念。",
+   "scenes": [
+    {
+     "name": "请求 → 应答 → 写缓存",
+     "steps": [
+      {
+       "who": "主机A",
+       "to": "同网段广播",
+       "pkt": 0,
+       "bubble": "Who has 10.10.10.8?",
+       "hl": [
+        "Ethernet Destination",
+        "Operation",
+        "Sender Protocol Address",
+        "Target Protocol Address"
+       ],
+       "vals": {
+        "Ethernet Destination": "ff:ff:ff:ff:ff:ff（广播）",
+        "Operation": "1（请求）",
+        "Sender Protocol Address": "10.10.10.1（自己）",
+        "Target Protocol Address": "10.10.10.8（网关）"
+       },
+       "say": "「谁有 10.10.10.8？告诉 10.10.10.1」——一封广播问遍整个广播域。",
+       "sub": "目的 IP 不在本网段时，解析的是网关的 MAC，不是最终主机。"
+      },
+      {
+       "who": "网关",
+       "to": "主机A",
+       "pkt": 1,
+       "bubble": "10.10.10.8 is at 00:11:22:33:44:55",
+       "hl": [
+        "Operation",
+        "Sender Hardware Address",
+        "Sender Protocol Address",
+        "Ethernet Destination"
+       ],
+       "vals": {
+        "Operation": "2（应答）",
+        "Sender Hardware Address": "00:11:22:33:44:55",
+        "Sender Protocol Address": "10.10.10.8",
+        "Ethernet Destination": "单播回主机A"
+       },
+       "say": "只有它自己回答，单播交出自己的 MAC——一次交互就够，不需要确认。",
+       "sub": "应答不必与请求对应，谁发来都照收。"
+      },
+      {
+       "who": "主机A",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "写入 ARP 缓存",
+       "hl": [
+        "Sender Protocol Address",
+        "Sender Hardware Address",
+        "Target Protocol Address"
+       ],
+       "vals": {
+        "Sender Protocol Address": "10.10.10.8",
+        "Sender Hardware Address": "00:11:22:33:44:55",
+        "Target Protocol Address": "后续发帧直接查表"
+       },
+       "say": "IP 到 MAC 的映射写进内存里的 ARP 表，之后发帧查表，不再问。",
+       "sub": "表项存在 RAM 里，重启即清空，靠老化定时器维护。"
+      },
+      {
+       "who": "主机A",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "表项老化",
+       "hl": [
+        "Sender Hardware Address"
+       ],
+       "vals": {
+        "Sender Hardware Address": "过期后重新解析"
+       },
+       "say": "表项有老化时间（常见几分钟），过期就得重新问一遍。",
+       "sub": "这既是自愈能力，也逼攻击者周期性重发伪造应答。"
+      },
+      {
+       "who": "主机A",
+       "to": "同网段广播",
+       "pkt": 0,
+       "bubble": "免费 ARP：自我宣告",
+       "hl": [
+        "Operation",
+        "Sender Protocol Address",
+        "Target Protocol Address"
+       ],
+       "vals": {
+        "Operation": "1（请求，目标填自己）",
+        "Sender Protocol Address": "10.10.10.1",
+        "Target Protocol Address": "10.10.10.1"
+       },
+       "say": "开机或换网卡时广播免费 ARP，自我宣告并顺手纠正别人的错误表项。",
+       "sub": "本用于善意纠正，伪造者拿它直接覆盖别人的表项。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ip neigh show",
+        "n": "ARP 表的现代写法：IP、MAC 与状态（REACHABLE / STALE / FAILED）",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "ping -c 2 10.10.10.8 && ip neigh show 10.10.10.8",
+        "n": "先触发一次解析再看表项，能观察到由 REACHABLE 转 STALE 的老化过程",
+        "s": "《系统》Linux.md · ping"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetNeighbor -AddressFamily IPv4 | Select IPAddress,LinkLayerAddress,State",
+        "n": "邻居表：State 为 Reachable 是通的，Permanent 是静态绑定",
+        "s": "《系统》PowerShell.md · Get-NetNeighbor"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "arp -a",
+        "n": "按接口列出 IP-MAC 对照表，类型 dynamic 表示可被动态覆盖",
+        "s": "《系统》Windows CMD.md · arp"
+       },
+       {
+        "c": "arp -a 10.10.10.8",
+        "n": "只查网关那一条，核对 MAC 是否还是预期值",
+        "s": "《系统》Windows CMD.md · arp"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "谁能发出应答，谁就能决定别人的流量去哪；谁发请求，谁就能测绘",
+   "lead": "两招都零门槛：伪造一条应答，或把请求发满整个网段。前者改流量，后者画地图。",
+   "scenes": [
+    {
+     "name": "中间人：两边各骗一次，双向都过攻击者",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "主机A",
+       "pkt": 1,
+       "bubble": "应答｜网关 IP = 攻击者 MAC",
+       "evil": true,
+       "hl": [
+        "Operation",
+        "Sender Protocol Address",
+        "Sender Hardware Address",
+        "Ethernet Destination"
+       ],
+       "vals": {
+        "Operation": "2（应答）",
+        "Sender Protocol Address": "10.10.10.8（冒充网关）",
+        "Sender Hardware Address": "aa:bb:cc:dd:ee:ff（攻击者）",
+        "Ethernet Destination": "ff:ff:ff:ff:ff:ff"
+       },
+       "say": "一条伪造应答：网关的 IP 指向攻击者 MAC，广播一次覆盖全网。",
+       "sub": "主机不会去核对「我到底问过没有」。"
+      },
+      {
+       "who": "攻击者",
+       "to": "网关",
+       "pkt": 1,
+       "bubble": "应答｜受害者 IP = 攻击者 MAC",
+       "evil": true,
+       "hl": [
+        "Operation",
+        "Sender Protocol Address",
+        "Sender Hardware Address",
+        "Target Protocol Address"
+       ],
+       "vals": {
+        "Operation": "2（应答）",
+        "Sender Protocol Address": "10.10.10.1（冒充受害者）",
+        "Sender Hardware Address": "aa:bb:cc:dd:ee:ff",
+        "Target Protocol Address": "10.10.10.8"
+       },
+       "say": "反手再骗网关一次：受害者的 IP 也指向攻击者，双向路径闭合。",
+       "sub": "只骗一边只能看到上行，骗两边才拿得到完整会话。"
+      },
+      {
+       "who": "主机A",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "目的 MAC = 攻击者",
+       "hl": [
+        "Ethernet Destination",
+        "Ethernet Source",
+        "EtherType"
+       ],
+       "vals": {
+        "Ethernet Destination": "aa:bb:cc:dd:ee:ff",
+        "Ethernet Source": "b2:34:55:10:22:10",
+        "EtherType": "0x0800（里面是 IP）"
+       },
+       "say": "主机A 以为在和网关说话，帧却进了攻击者网卡，它没有任何告警。",
+       "sub": "帧头目的 MAC 就是查 ARP 表查出来的结果。"
+      },
+      {
+       "who": "攻击者",
+       "to": "网关",
+       "pkt": 0,
+       "bubble": "原样转发",
+       "hl": [
+        "Ethernet Source",
+        "Ethernet Destination"
+       ],
+       "vals": {
+        "Ethernet Source": "aa:bb:cc:dd:ee:ff（攻击者的真实网卡）",
+        "Ethernet Destination": "00:11:22:33:44:55（网关）"
+       },
+       "say": "转发一遍，通信看着正常，只多一跳时延，可以长期驻留不被发现。",
+       "sub": "选择不转发就是拒绝服务，且排查时先怀疑网络。"
+      },
+      {
+       "who": "攻击者",
+       "to": "主机A",
+       "pkt": 1,
+       "bubble": "每 30 秒重发一次",
+       "evil": true,
+       "hl": [
+        "Operation",
+        "Sender Protocol Address",
+        "Sender Hardware Address"
+       ],
+       "vals": {
+        "Operation": "2（应答）",
+        "Sender Protocol Address": "10.10.10.8",
+        "Sender Hardware Address": "aa:bb:cc:dd:ee:ff"
+       },
+       "say": "对抗缓存老化，周期性重发——这个规律正是检测最好用的特征。",
+       "sub": "某 MAC 高频发送应答，基线一比就露。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any 'arp and arp[6:2] == 2'",
+        "n": "只看 ARP 应答（操作码 2），某 MAC 密集应答即为欺骗特征",
+        "s": "补充（vault 无 tcpdump，ARP 取证必备）"
+       },
+       {
+        "c": "sudo arpspoof -i eth0 -t 10.10.10.1 10.10.10.8",
+        "n": "对 10.10.10.1 冒充 10.10.10.8（dsniff 包，仅限授权环境）",
+        "s": "补充（dsniff 的 arpspoof，vault 无）"
+       },
+       {
+        "c": "ip neigh show 10.10.10.8",
+        "n": "看受害者缓存里网关的 MAC 有没有变成陌生地址",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetNeighbor -IPAddress 10.10.10.8 | Select IPAddress,LinkLayerAddress,State",
+        "n": "本机视角核对网关 MAC；被污染时这里就是攻击者网卡",
+        "s": "《系统》PowerShell.md · Get-NetNeighbor"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "arp -a | findstr 10.10.10.8",
+        "n": "网关条目是否还指向预期 MAC，一眼可判",
+        "s": "《系统》Windows CMD.md · arp"
+       }
+      ]
+     }
+    },
+    {
+     "name": "ARP 扫描：不要端口，也能把网段摸清",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "同网段 254 个地址",
+       "pkt": 0,
+       "bubble": "Who has 10.10.10.1~254?",
+       "evil": true,
+       "hl": [
+        "Operation",
+        "Ethernet Destination",
+        "Target Protocol Address"
+       ],
+       "vals": {
+        "Operation": "1（请求）",
+        "Ethernet Destination": "ff:ff:ff:ff:ff:ff",
+        "Target Protocol Address": "10.10.10.1 → 10.10.10.254 递增"
+       },
+       "say": "逐个 IP 发请求：不走 TCP/UDP，端口策略和握手日志都看不见它。",
+       "sub": "被问到的主机即使不回话，网卡也已经把帧收下了。"
+      },
+      {
+       "who": "在线主机",
+       "to": "攻击者",
+       "pkt": 1,
+       "bubble": "应答｜真实 IP 与 MAC",
+       "hl": [
+        "Operation",
+        "Sender Protocol Address",
+        "Sender Hardware Address"
+       ],
+       "vals": {
+        "Operation": "2（应答）",
+        "Sender Protocol Address": "自己的 IP",
+        "Sender Hardware Address": "自己的 MAC"
+       },
+       "say": "谁在线谁应答：一次交互就交出 IP、MAC 与网卡厂商。",
+       "sub": "MAC 前三字节是 OUI，能认出设备型号。"
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "汇总：存活清单",
+       "hl": [
+        "Sender Protocol Address",
+        "Sender Hardware Address"
+       ],
+       "vals": {
+        "Sender Protocol Address": "存活 IP 列表",
+        "Sender Hardware Address": "对应 MAC 列表"
+       },
+       "say": "汇总应答，得到整段存活清单和网关地址。",
+       "sub": "比 ping 扫描可靠：很多主机封 ICMP 却不封 ARP。"
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "按 OUI 挑软柿子",
+       "hl": [
+        "Hardware Type",
+        "Sender Hardware Address"
+       ],
+       "vals": {
+        "Hardware Type": "0x0001（以太网）",
+        "Sender Hardware Address": "b2:34:55 → OUI 查厂商"
+       },
+       "say": "按网卡厂商认出打印机、摄像头、工控设备这些弱终端。",
+       "sub": "这些设备往往没有 DAI 保护，也长期不换 MAC。"
+      },
+      {
+       "who": "攻击者",
+       "to": "选定受害者",
+       "pkt": 1,
+       "bubble": "转入定向欺骗",
+       "evil": true,
+       "hl": [
+        "Operation",
+        "Sender Protocol Address",
+        "Target Protocol Address"
+       ],
+       "vals": {
+        "Operation": "2（应答）",
+        "Sender Protocol Address": "10.10.10.8",
+        "Target Protocol Address": "10.10.10.1"
+       },
+       "say": "扫描阶段得到的清单直接变成受害者名单，转入定向欺骗。",
+       "sub": "测绘不产生破坏，所以最容易被放过。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo arp-scan -I eth0 --localnet",
+        "n": "一次扫完整个网段，输出 IP、MAC 与厂商（仅授权环境）",
+        "s": "补充（arp-scan 专用于二层测绘，vault 无）"
+       },
+       {
+        "c": "for i in $(seq 1 254); do ping -c1 -W1 10.10.10.$i >/dev/null & done; wait; ip neigh show",
+        "n": "没有 arp-scan 时的替代：并发 ping 触发解析，再读邻居表",
+        "s": "《系统》Linux.md · ping"
+       },
+       {
+        "c": "ip neigh show | grep -v FAILED",
+        "n": "过滤掉解析失败的表项，剩下的就是当前活跃邻居",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetNeighbor -AddressFamily IPv4 | Where-Object State -ne 'Unreachable'",
+        "n": "本机邻居表里的活跃项，等价于一次被动测绘结果",
+        "s": "《系统》PowerShell.md · Get-NetNeighbor"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "arp -a",
+        "n": "扫完后整张表就是清单，IP、MAC、类型一览",
+        "s": "《系统》Windows CMD.md · arp"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "交换机按绑定表校验，主机写死表项，广播域被切开",
+   "lead": "ARP 没有补丁可打，只能在它外面加一层校验，或把「同广播域」这个前提拆掉。",
+   "scenes": [
+    {
+     "name": "绑定表 + 静态项 + 缩小广播域",
+     "steps": [
+      {
+       "who": "接入交换机",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "DAI：核 IP-MAC-端口",
+       "hl": [
+        "Operation",
+        "Sender Protocol Address",
+        "Sender Hardware Address"
+       ],
+       "vals": {
+        "Operation": "2",
+        "Sender Protocol Address": "与绑定表不符",
+        "Sender Hardware Address": "与端口学习结果不符"
+       },
+       "say": "DAI 按 DHCP Snooping 绑定表核对，伪造应答在交换机上就被丢弃。",
+       "sub": "绑定表来自 DHCP，静态配置的主机要手工补。"
+      },
+      {
+       "who": "网关",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "静态表项：不许动态覆盖",
+       "hl": [
+        "Sender Protocol Address",
+        "Sender Hardware Address"
+       ],
+       "vals": {
+        "Sender Protocol Address": "10.10.10.1",
+        "Sender Hardware Address": "00:11:22:33:44:55（写死）"
+       },
+       "say": "关键设备写静态绑定，动态应答覆盖不了它。",
+       "sub": "代价随终端数量线性上升，换网卡即失效。"
+      },
+      {
+       "who": "主机A",
+       "to": "网关",
+       "pkt": 0,
+       "bubble": "端口隔离：只与网关二层互通",
+       "hl": [
+        "Ethernet Destination",
+        "Target Protocol Address"
+       ],
+       "vals": {
+        "Ethernet Destination": "只能到上行网关",
+        "Target Protocol Address": "10.10.10.8"
+       },
+       "say": "端口隔离或私用 VLAN 破坏「同广播域」前提，终端之间收不到彼此的 ARP。",
+       "sub": "同时也切断了终端间合法的共享与发现协议。"
+      },
+      {
+       "who": "监控",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "一对多即告警",
+       "hl": [
+        "Sender Protocol Address",
+        "Sender Hardware Address"
+       ],
+       "vals": {
+        "Sender Protocol Address": "同一 IP 出现两个 MAC",
+        "Sender Hardware Address": "同一 MAC 对应多个 IP"
+       },
+       "say": "ARPWatch 类工具按「一对一被破坏」告警：一对多就是有人在冒充。",
+       "sub": "只能发现不能阻断，基线比规则更重要。"
+      },
+      {
+       "who": "主机A",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "缓存维持原值",
+       "hl": [
+        "Sender Protocol Address",
+        "Sender Hardware Address"
+       ],
+       "vals": {
+        "Sender Protocol Address": "10.10.10.8",
+        "Sender Hardware Address": "仍是 00:11:22:33:44:55"
+       },
+       "say": "闭环：伪造应答进不了缓存，表里的网关 MAC 始终没变。",
+       "sub": "IPv4/以太网体系内只能缓解，根治要换协议。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo ip neigh replace 10.10.10.8 lladdr 00:11:22:33:44:55 nud permanent",
+        "n": "写静态邻居表项，permanent 不会被任何动态应答覆盖",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "ip -s neigh show",
+        "n": "带统计的邻居表：观察条目是否被频繁改写",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'arp and arp[6:2] == 2 and not ether src 00:11:22:33:44:55'",
+        "n": "抓「不是网关发的、却声称自己是网关」的应答，即 DAI 的软件版",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetNeighbor | Group-Object LinkLayerAddress | Where-Object Count -gt 1",
+        "n": "一个 MAC 对应多个 IP：有人在网关侧冒充一堆主机",
+        "s": "《系统》PowerShell.md · Get-NetNeighbor"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "arp -a",
+        "n": "巡检时核对网关条目；类型从 dynamic 变 permanent 说明绑定生效",
+        "s": "《系统》Windows CMD.md · arp"
+       },
+       {
+        "c": "netsh interface ipv4 show neighbors",
+        "n": "netsh 视角的邻居表，与 arp -a 互为印证",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

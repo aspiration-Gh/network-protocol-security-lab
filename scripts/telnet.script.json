@@ -1,0 +1,537 @@
+{
+ "id": "telnet",
+ "notes": {
+  "IAC": {
+   "short": "0xFF 开关，之后一字节是命令",
+   "more": "Interpret As Command：这个字节把流从数据模式切到命令模式，紧接的一个字节按命令码解释；数据里要出现 0xFF 必须双写。",
+   "sec": "任何未对 0xFF 转义的数据通道，都变成了向对端发命令的通道。"
+  },
+  "Option ECHO": {
+   "short": "回显选项，关掉本地回显",
+   "more": "服务器发 WILL ECHO 表示由它回显，客户端回 DO ECHO 后关闭本地回显，这就是登录时口令不上屏的全部机制。",
+   "sec": "注入一条 WILL ECHO 就能让用户看不到自己输入的口令，而字节照样明文上网。"
+  },
+  "Terminal Type": {
+   "short": "无长度字段，边界只靠 IAC SE",
+   "more": "SB 段里没有长度前缀，字符串一直到 IAC SE 为止；段内字节同样要遵守 0xFF 转义，漏一次边界就会错位。",
+   "sec": "边界错位后，后面的数据会被当成命令码执行，这是 Telnet 解析器最常出事的地方。"
+  },
+  "SB": {
+   "short": "子协商开始，到 IAC SE 结束",
+   "more": "250，表示后面是一段属于某个选项的结构化参数；终端类型、窗口大小这类带参数的选项都靠它承载。",
+   "sec": "SB 段是 Telnet 里唯一能携带长参数的地方，也是缓冲区溢出最集中的位置。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "0xFF 划界、四个动词协商、SB 段承载参数：全部明文",
+   "lead": "只看两个字节就够：0xFF 让流切到命令模式，双写 0xFF 再把它变回数据。",
+   "scenes": [
+    {
+     "name": "协商与转义",
+     "steps": [
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "IAC WILL ECHO",
+       "hl": [
+        "IAC",
+        "WILL",
+        "Option ECHO"
+       ],
+       "vals": {
+        "IAC": "0xFF",
+        "WILL": "251",
+        "Option ECHO": "1（ECHO）"
+       },
+       "say": "服务器声明由它回显，这是口令不上屏的全部机制。",
+       "sub": "选项号是全局的，方向由 WILL/DO 决定。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "IAC DO ECHO",
+       "hl": [
+        "IAC",
+        "DO",
+        "Option ECHO"
+       ],
+       "vals": {
+        "DO": "253",
+        "Option ECHO": "1"
+       },
+       "say": "客户端同意，随后关掉本地回显，避免字符重复。",
+       "sub": "两个方向各自协商，状态机必须记住结果。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "询问终端类型",
+       "hl": [
+        "SB",
+        "Option TERMINAL-TYPE"
+       ],
+       "vals": {
+        "SB": "250",
+        "Option TERMINAL-TYPE": "24"
+       },
+       "say": "带参数的选项走子协商：IAC SB 加选项码，用 IAC SE 收尾。",
+       "sub": "SB 段没有任何长度字段，边界只认 SE 的位置。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 1,
+       "bubble": "IS xterm",
+       "hl": [
+        "Qualifier IS",
+        "Terminal Type",
+        "SE"
+       ],
+       "vals": {
+        "Qualifier IS": "0（IS）",
+        "Terminal Type": "xterm",
+        "SE": "240"
+       },
+       "say": "客户端把终端类型塞进 SB 段，服务器据此挑控制序列。",
+       "sub": "段内字节同样要 0xFF 转义，漏一次边界就错位。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 2,
+       "bubble": "cat + 0xFF + 回车",
+       "hl": [
+        "Data",
+        "IAC IAC",
+        "CR",
+        "NUL"
+       ],
+       "vals": {
+        "Data": "cat",
+        "IAC IAC": "0xFF 0xFF",
+        "CR": "0x0D",
+        "NUL": "0x00"
+       },
+       "say": "数据里要出现 0xFF 必须双写；孤立回车写成 CR NUL。",
+       "sub": "NVT 只有这两条转义规则，全靠实现老实遵守。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "telnet 192.0.2.10",
+        "n": "连 23 端口；登录后 Ctrl+] 再输入 toggle options 能看实时协商",
+        "s": "补充（telnet 客户端，仓库未收录）"
+       },
+       {
+        "c": "timeout 3 telnet 192.0.2.10 | od -An -tx1 -w16",
+        "n": "把服务端发来的字节按十六进制看：ff fb 01 就是 IAC WILL ECHO",
+        "s": "补充（od 十六进制查看）"
+       },
+       {
+        "c": "ss -tnie '( dport = :23 )'",
+        "n": "看会话字节计数；Telnet 全明文，收发量与会话内容一一对应",
+        "s": "补充（ss 套接字统计，仓库未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection 192.0.2.10 -Port 23",
+        "n": "测 23 端口；通了说明明文终端还开着",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -an | findstr :23",
+        "n": "看本机 23 端口的连接状态",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "一条路听内容，一条路改行为：明文与同流命令各是一个入口",
+   "lead": "嗅探不需要技巧，注入只需要一个没做转义的入库点。",
+   "scenes": [
+    {
+     "name": "明文嗅探与会话劫持",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "接入交换机",
+       "pkt": 2,
+       "bubble": "镜像口抓包",
+       "evil": true,
+       "hl": [
+        "Data"
+       ],
+       "vals": {
+        "Data": "tcp port 23"
+       },
+       "say": "同网段或镜像口抓包，整条会话都是可读文本。",
+       "sub": "协议没有任何加密层，抓到即得到内容。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 2,
+       "bubble": "login: admin",
+       "hl": [
+        "Data"
+       ],
+       "vals": {
+        "Data": "login: admin"
+       },
+       "say": "用户名以 NVT-ASCII 明文出现，就是屏幕上的那行字。",
+       "sub": "口令还没开始，账户名已经交出去了。"
+      },
+      {
+       "who": "服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "Password:",
+       "hl": [
+        "Option ECHO"
+       ],
+       "vals": {
+        "Option ECHO": "1（不回显）"
+       },
+       "say": "IAC WILL ECHO 只让屏幕不显示，字节照旧明文上网。",
+       "sub": "看不见不等于加密，这是最容易误解的一点。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 2,
+       "bubble": "P@ssw0rd",
+       "hl": [
+        "Data",
+        "CR"
+       ],
+       "vals": {
+        "Data": "P@ssw0rd",
+        "CR": "0x0D"
+       },
+       "say": "口令就在载荷里，攻击者不需要任何破解。",
+       "sub": "CR NUL 还是 CR LF 只影响回车语义，不影响可读性。"
+      },
+      {
+       "who": "攻击者",
+       "to": "服务器",
+       "pkt": 2,
+       "bubble": "重放凭据",
+       "evil": true,
+       "hl": [
+        "Data"
+       ],
+       "vals": {
+        "Data": "USER/PASS 重放"
+       },
+       "say": "协议没有会话凭证，持包人就是本人，服务器分不出来。",
+       "sub": "四元组对上还能直接往现有连接里注入命令。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -i eth0 -A 'tcp port 23'",
+        "n": "-A 直接打出可读文本，login 与口令两行原样可见",
+        "s": "补充（tcpdump，仓库未收录）"
+       },
+       {
+        "c": "sudo tcpdump -i eth0 -X 'tcp port 23'",
+        "n": "-X 十六进制加 ASCII，能看到 IAC（ff）协商与明文数据混在一起",
+        "s": "补充（tcpdump，仓库未收录）"
+       },
+       {
+        "c": "ss -tnie '( dport = :23 )'",
+        "n": "确认连接仍活跃；没有会话令牌，四元组对上就能注入",
+        "s": "补充（ss 套接字统计，仓库未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetTCPConnection -RemotePort 23",
+        "n": "列出到 23 端口的连接与进程，确认谁在明文登录",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -ano | findstr :23",
+        "n": "看连接状态与占用进程 PID",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    },
+    {
+     "name": "IAC 会话语义注入",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "业务系统",
+       "pkt": 1,
+       "bubble": "report\\xff\\xfb\\x01.txt",
+       "evil": true,
+       "hl": [
+        "Terminal Type"
+       ],
+       "vals": {
+        "Terminal Type": "report + 0xFF 0xFB 0x01 + .txt"
+       },
+       "say": "找一个会被回显或转发到终端的数据入口，把 0xFF 藏进文件名。",
+       "sub": "只需要一个没做转义的入库点。"
+      },
+      {
+       "who": "业务系统",
+       "to": "Telnet 网关",
+       "pkt": 1,
+       "bubble": "原样写入",
+       "hl": [
+        "Terminal Type"
+       ],
+       "vals": {
+        "Terminal Type": "未双写，直接写入"
+       },
+       "say": "缺一次 0xFF 双写，数据字节就获得了命令语义。",
+       "sub": "转义规则是唯一防线，漏一处整体失效。"
+      },
+      {
+       "who": "Telnet 客户端",
+       "to": "本地终端",
+       "pkt": 0,
+       "bubble": "解析成 IAC WILL ECHO",
+       "hl": [
+        "IAC",
+        "WILL",
+        "Option ECHO"
+       ],
+       "vals": {
+        "IAC": "0xFF",
+        "WILL": "251",
+        "Option ECHO": "1"
+       },
+       "say": "客户端把它当成服务器协商，回 DO ECHO 后关掉本地回显。",
+       "sub": "从此用户输入什么都不会出现在屏幕上。"
+      },
+      {
+       "who": "受害者",
+       "to": "Telnet 客户端",
+       "pkt": 2,
+       "bubble": "继续输入口令",
+       "hl": [
+        "Data"
+       ],
+       "vals": {
+        "Data": "口令（不上屏）"
+       },
+       "say": "口令既看不到也无法核对，仍明文发往对端。",
+       "sub": "嗅探这条路同时被打开。"
+      },
+      {
+       "who": "攻击者",
+       "to": "Telnet 客户端",
+       "pkt": 1,
+       "bubble": "伪造子协商",
+       "evil": true,
+       "hl": [
+        "SB",
+        "Option TERMINAL-TYPE"
+       ],
+       "vals": {
+        "SB": "0xFF 0xFA（伪造 SB）",
+        "Option TERMINAL-TYPE": "24 → 换掉终端类型"
+       },
+       "say": "再灌一段伪造的 SB，把终端类型改成服务端预期外的值。",
+       "sub": "之后服务器发的每个控制序列都被解释错。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "printf 'report\\xff\\xfb\\x01.txt' | xxd",
+        "n": "构造带 0xFF 的载荷：ff fb 01 就是 IAC WILL ECHO",
+        "s": "补充（xxd 十六进制查看）"
+       },
+       {
+        "c": "printf '\\xff\\xfb\\x01' | nc -w1 192.0.2.10 23",
+        "n": "把未转义的协商字节直接灌进 23 端口，看对端是否按命令解析",
+        "s": "补充（nc 裸 TCP 发送）"
+       },
+       {
+        "c": "ss -tnie '( dport = :23 )'",
+        "n": "确认注入走的还是同一条明文会话",
+        "s": "补充（ss 套接字统计，仓库未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection 192.0.2.10 -Port 23",
+        "n": "先确认 23 可达，注入才有对象",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -an | findstr :23",
+        "n": "确认会话存在，注入与嗅探走同一条流",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "关端口、双写转义、选项白名单：三道闸各挡一类问题",
+   "lead": "换协议消掉明文，转义消掉注入，白名单消掉多余的协商面。",
+   "scenes": [
+    {
+     "name": "关端口 + 转义 + 白名单",
+     "steps": [
+      {
+       "who": "管理员",
+       "to": "接入设备",
+       "pkt": 0,
+       "bubble": "23 关闭",
+       "hl": [
+        "Option ECHO"
+       ],
+       "vals": {
+        "Option ECHO": "23 → 停止监听"
+       },
+       "say": "先关端口：交互登录一律改走 22 的 SSH。",
+       "sub": "换协议是唯一能把明文问题一次性消掉的办法。"
+      },
+      {
+       "who": "业务系统",
+       "to": "Telnet 网关",
+       "pkt": 1,
+       "bubble": "0xFF → 0xFF 0xFF",
+       "hl": [
+        "Terminal Type"
+       ],
+       "vals": {
+        "Terminal Type": "双写转义后"
+       },
+       "say": "所有外部数据写进流之前强制双写，注入字节退化回普通字符。",
+       "sub": "转义必须落在写入口，不能靠事后过滤。"
+      },
+      {
+       "who": "Telnet 客户端",
+       "to": "本地终端",
+       "pkt": 0,
+       "bubble": "只放行白名单选项",
+       "hl": [
+        "IAC",
+        "WILL",
+        "Option ECHO"
+       ],
+       "vals": {
+        "WILL": "仅 ECHO/SGA/TT/NAWS",
+        "Option ECHO": "1"
+       },
+       "say": "网关只放行 ECHO、SGA、TERMINAL-TYPE、NAWS，多余协商直接拒。",
+       "sub": "状态机记住已拒绝项，顺带堵住协商风暴。"
+      },
+      {
+       "who": "攻击者",
+       "to": "Telnet 网关",
+       "pkt": 1,
+       "bubble": "同一个文件名",
+       "evil": true,
+       "hl": [
+        "Terminal Type"
+       ],
+       "vals": {
+        "Terminal Type": "report + 0xFF 0xFB 0x01 + .txt"
+       },
+       "say": "同样的载荷再来一次，两个 0xFF 被还原成数据而不是命令。",
+       "sub": "文件名字面上只是多了一个不可打印字符。"
+      },
+      {
+       "who": "Telnet 客户端",
+       "to": "本地终端",
+       "pkt": 2,
+       "bubble": "report 加一个字符",
+       "hl": [
+        "Data",
+        "IAC IAC"
+       ],
+       "vals": {
+        "Data": "report",
+        "IAC IAC": "还原成一个 0xFF"
+       },
+       "say": "客户端只把它当普通字符写进屏幕，回显与进程都不受影响。",
+       "sub": "数据回到数据的位置，命令语义消失。"
+      },
+      {
+       "who": "管理员",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "管理网隔离",
+       "hl": [
+        "IAC"
+       ],
+       "vals": {
+        "IAC": "管理网内才可达"
+       },
+       "say": "确需保留的设备口关进独立管理网，经跳板机访问并全程审计。",
+       "sub": "隔离挡住外部，审计管住内部。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo ss -tlnp | grep ':23 '",
+        "n": "确认没有进程监听 23；没有输出就是关干净了",
+        "s": "补充（ss 套接字统计，仓库未收录）"
+       },
+       {
+        "c": "ssh user@192.0.2.10",
+        "n": "改用 SSH 交互登录，口令与命令都在加密信道内",
+        "s": "《系统》Linux.md · 8. Linux 远程登录"
+       },
+       {
+        "c": "sudo tcpdump -ni eth0 -X 'tcp port 23' | grep -c 'ff fb'",
+        "n": "统计流里未转义的 IAC 协商，白名单生效时应为 0",
+        "s": "补充（tcpdump，仓库未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetTCPConnection -LocalPort 23 -State Listen",
+        "n": "确认本机不再监听 23，无输出即已关闭",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall firewall show rule name=\"Block-Telnet\"",
+        "n": "确认 23 端口的阻断规则已建立并生效",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

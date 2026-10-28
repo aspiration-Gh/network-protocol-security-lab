@@ -1,0 +1,582 @@
+{
+ "id": "ipv4",
+ "notes": {
+  "IHL": {
+   "short": "首部长度，单位 4 字节",
+   "more": "4 位，值 ×4 才是字节数：5 = 20 字节（常态），15 = 60 字节上限。选项必须填充到 4 字节整数倍，所以 IHL 能把选项和载荷的边界挪来挪去。",
+   "sec": "写大而字节不够，解析器就把载荷当选项读，字段全部错位。"
+  },
+  "Total Length": {
+   "short": "整包长度，16 位上限 65535",
+   "more": "含首部与数据的字节数，最大 65535。它只约束单个分片，不约束重组后的总长——死亡之 ping 正是钻这一点。",
+   "sec": "与 IHL 不自洽（总长 < 首部长）是最经典的畸形包构造。"
+  },
+  "Identification": {
+   "short": "分片同组编号，可被猜中",
+   "more": "同一原始报文的所有分片复制同一个标识（IPv4 16 位，IPv6 分片头 32 位），接收端据此归队。历史上多为递增计数器，因此可预测。",
+   "sec": "猜中标识就能把伪造分片塞进别人的重组队列，篡改上层报文。"
+  },
+  "Fragment Offset": {
+   "short": "本片在原文中的位置",
+   "more": "13 位，单位 8 字节，所以除最后一片外每片数据长度必须是 8 的倍数。偏移本身合法，但「偏移 + 长度」是否越过前一片没有字段约束。",
+   "sec": "重叠偏移让重组长度算成负数，是 teardrop 的落点。"
+  },
+  "Flags + Fragment Offset": {
+   "short": "MF 标记还有没有下一片",
+   "more": "高 3 位为保留、DF、MF；低 13 位是偏移（×8）。MF=1 表示后面还有片，MF=0 表示这是最后一片；DF=1 禁止分片，超 MTU 只能丢并回 ICMP。",
+   "sec": "重叠片与「偏移指向已收区间」都要靠这里的组合来判断。"
+  },
+  "Time To Live": {
+   "short": "跳数预算，每跳减 1",
+   "more": "8 位，1~255，每经过一台路由器减 1，减到 0 就丢弃并回 ICMP 超时。它同时是防环机制和路径长度的间接度量。",
+   "sec": "TTL 异常一致或递增，常被用来判断伪造源地址的真实跳数。"
+  },
+  "Header Checksum": {
+   "short": "只校验首部，不校验载荷",
+   "more": "16 位反码求和，只覆盖 IP 首部，每跳因 TTL 变化都要重算。载荷完整性完全不在这里。",
+   "sec": "载荷被改 IP 层查不出来，这也解释了为什么分片污染要靠上层校验和兜底。"
+  },
+  "Options": {
+   "short": "可选字段：源路由、记录路由",
+   "more": "长度可变，LSRR/SSRR 可以把中转节点地址写进首部，从而指定报文路径；记录路由则让沿途设备填地址。出现选项时 IHL 随之变大。",
+   "sec": "源路由让实际路径与「看起来的来源」脱钩，可绕过基于接口的 ACL。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "20 字节首部跟着地址走，装不下就切片，目的端再拼回来",
+   "lead": "先看一个包从主机到目的端。三件事要盯住：地址决定去向、TTL 决定寿命、标识与偏移决定能不能拼回原样。",
+   "scenes": [
+    {
+     "name": "首部 → 转发 → 分片 → 重组",
+     "steps": [
+      {
+       "who": "主机A",
+       "to": "网关R1",
+       "pkt": 0,
+       "bubble": "IP 数据报 40 字节",
+       "hl": [
+        "Version",
+        "IHL",
+        "Total Length",
+        "Source Address",
+        "Destination Address"
+       ],
+       "vals": {
+        "Version": "4",
+        "IHL": "5（20 字节）",
+        "Total Length": "40",
+        "Source Address": "192.168.1.10",
+        "Destination Address": "8.8.8.8"
+       },
+       "say": "首部二十字节：版本 4、IHL=5，源与目的地址各占 4 字节。",
+       "sub": "地址是路由器唯一要读的东西，也是唯一没人核对的字段。"
+      },
+      {
+       "who": "网关R1",
+       "to": "目的服务器",
+       "pkt": 0,
+       "bubble": "转发：TTL−1",
+       "hl": [
+        "Time To Live",
+        "Header Checksum",
+        "Protocol"
+       ],
+       "vals": {
+        "Time To Live": "64 → 63",
+        "Header Checksum": "每跳重算",
+        "Protocol": "6（TCP）"
+       },
+       "say": "每跳把 TTL 减一并重算首部检验和——只校验首部，不碰载荷。",
+       "sub": "载荷被改了 IP 层也发现不了，完整性得靠 TCP 或 IPSec。"
+      },
+      {
+       "who": "网关R1",
+       "to": "目的服务器",
+       "pkt": 2,
+       "bubble": "分片：52 → 2×36 字节",
+       "hl": [
+        "Total Length",
+        "Identification",
+        "Flags + Fragment Offset",
+        "Fragment Data"
+       ],
+       "vals": {
+        "Total Length": "36",
+        "Identification": "0x1c47",
+        "Flags + Fragment Offset": "offset=2（第 16 字节）, MF=0",
+        "Fragment Data": "16 字节"
+       },
+       "say": "下一跳 MTU 只有 36 字节：52 字节被切成两片，标识原样复制。",
+       "sub": "偏移单位是 8 字节，所以除最后一片外长度必须是 8 的倍数。"
+      },
+      {
+       "who": "目的服务器",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "重组：按标识归队",
+       "hl": [
+        "Identification",
+        "Flags + Fragment Offset",
+        "Fragment Data"
+       ],
+       "vals": {
+        "Identification": "0x1c47 同组",
+        "Flags + Fragment Offset": "offset=2 → 从第 16 字节写起",
+        "Fragment Data": "拼回 32 字节"
+       },
+       "say": "目的端按「标识 + 偏移」归队，MF=0 说明这是最后一片。",
+       "sub": "中间路由器从不重组，只把片各自送到。"
+      },
+      {
+       "who": "主机A",
+       "to": "网关R1",
+       "pkt": 1,
+       "bubble": "带 LSRR 选项的 28 字节首部",
+       "hl": [
+        "IHL",
+        "Options",
+        "Protocol"
+       ],
+       "vals": {
+        "IHL": "7（28 字节）",
+        "Options": "LSRR 9.0.0.1",
+        "Protocol": "1（ICMP）"
+       },
+       "say": "可选字段能把中转节点写进首部，IHL 因此从 5 变成 7。",
+       "sub": "排障时有用，但它能让报文从「被信任的邻居」进来。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ip -4 route get 8.8.8.8",
+        "n": "看这条目的地址走哪个出口、源地址被选成哪个——转发决策的全部输入",
+        "s": "《系统》Linux.md · ip"
+       },
+       {
+        "c": "ping -M do -s 1472 8.8.8.8",
+        "n": "DF=1 打 1472 字节载荷，能通说明路径 MTU 1500，全程没分片",
+        "s": "《系统》Linux.md · ping"
+       },
+       {
+        "c": "traceroute -n 8.8.8.8",
+        "n": "逐跳列出路径与 RTT，某跳之后全星号通常是策略丢包而非断开",
+        "s": "补充（vault 无 traceroute，看逐跳路径必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection 8.8.8.8 -InformationLevel Detailed",
+        "n": "本机视角的连通性：是否可达、走了哪个源地址、RTT 多少",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "tracert -d 8.8.8.8",
+        "n": "-d 不反解域名，最快看出在第几跳开始不通",
+        "s": "《系统》Windows CMD.md · tracert"
+       },
+       {
+        "c": "ping -f -l 1472 8.8.8.8",
+        "n": "-f 置 DF、-l 指定载荷；1472+28=1500，通即证明无需分片",
+        "s": "《系统》Windows CMD.md · ping"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "源地址没人核对，分片没人担保——两处空白各开一扇门",
+   "lead": "本幕两招都只利用一件事：路由器只按目的地址转发、接收端只按标识与偏移归队。",
+   "scenes": [
+    {
+     "name": "源地址欺骗：伪造源，回包打给第三方",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "目的服务器",
+       "pkt": 0,
+       "bubble": "SYN｜源=192.168.1.10",
+       "evil": true,
+       "hl": [
+        "Source Address",
+        "Destination Address",
+        "Protocol"
+       ],
+       "vals": {
+        "Source Address": "192.168.1.10（冒充别人）",
+        "Destination Address": "8.8.8.8",
+        "Protocol": "6（TCP）"
+       },
+       "say": "源地址随手填成别人的：没有一台设备核对它是否属于这条链路。",
+       "sub": "转发只看目的地址，源地址只被抄进日志。"
+      },
+      {
+       "who": "目的服务器",
+       "to": "被冒充者",
+       "pkt": 0,
+       "bubble": "SYN+ACK → 192.168.1.10",
+       "hl": [
+        "Destination Address",
+        "Source Address"
+       ],
+       "vals": {
+        "Destination Address": "192.168.1.10",
+        "Source Address": "8.8.8.8"
+       },
+       "say": "回包按源地址寄出，落到被冒充者头上，攻击者根本收不到。",
+       "sub": "这就是单向性：只能做盲攻击或反射。"
+      },
+      {
+       "who": "被冒充者",
+       "to": "目的服务器",
+       "pkt": 0,
+       "bubble": "RST",
+       "hl": [
+        "Source Address",
+        "Destination Address",
+        "Time To Live"
+       ],
+       "vals": {
+        "Source Address": "192.168.1.10（真实主人）",
+        "Destination Address": "8.8.8.8",
+        "Time To Live": "64"
+       },
+       "say": "无辜主机收到莫名其妙的 SYN+ACK，只能回 RST，日志里留下的是它。",
+       "sub": "追责、封禁、告警全部指向第三方。"
+      },
+      {
+       "who": "攻击者",
+       "to": "目的服务器",
+       "pkt": 0,
+       "bubble": "SYN ×N｜源随机",
+       "evil": true,
+       "hl": [
+        "Source Address",
+        "Time To Live"
+       ],
+       "vals": {
+        "Source Address": "每次都换",
+        "Time To Live": "随机"
+       },
+       "say": "换一个源地址再来一次：按源 IP 封禁就变成误伤第三方。",
+       "sub": "随机伪造源的 SYN 泛洪，是最省事的拒绝服务。"
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "模板复用",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "192.168.1.10"
+       },
+       "say": "整场攻击里，攻击者的真实地址从未出现在任何字段中。",
+       "sub": "同一份模板可直接用于 DNS 污染与序列号猜测。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any 'ip src 192.168.1.10 and tcp[tcpflags] & tcp-syn != 0'",
+        "n": "抓「以被冒充者名义发来的 SYN」：本不该出现在这个方向的流量",
+        "s": "补充（vault 无 tcpdump，抓伪造报文必备）"
+       },
+       {
+        "c": "sudo hping3 -S -a 192.168.1.10 -p 80 8.8.8.8 -c 3",
+        "n": "-a 指定伪造源地址，发 3 个 SYN 看是否被路径丢弃（仅授权环境）",
+        "s": "补充（hping3 是构造伪造源分组的标准工具）"
+       },
+       {
+        "c": "ip -4 route get 192.168.1.10",
+        "n": "反查该源地址的回程路由，uRPF 就是拿它和入接口比对",
+        "s": "《系统》Linux.md · ip"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-NetConnection 8.8.8.8 -Port 80",
+        "n": "从本机看能否建连；受害者侧看到的是「连上了又被 RST」",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -an | findstr 8.8.8.8",
+        "n": "连接表里只有被冒充的那个源地址，找不到真正发包的人",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    },
+    {
+     "name": "泪滴：重叠分片让长度算成负数",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "受害者主机",
+       "pkt": 2,
+       "bubble": "片 1｜offset=0 MF=1",
+       "evil": true,
+       "hl": [
+        "Identification",
+        "Flags + Fragment Offset",
+        "Total Length",
+        "Fragment Data"
+       ],
+       "vals": {
+        "Identification": "0x1234",
+        "Flags + Fragment Offset": "offset=0, MF=1",
+        "Total Length": "1420",
+        "Fragment Data": "1400 字节"
+       },
+       "say": "第一片完全合法：偏移 0、MF=1，先占住重组队列的位置。",
+       "sub": "接收端靠标识把片归进同一个队列。"
+      },
+      {
+       "who": "攻击者",
+       "to": "受害者主机",
+       "pkt": 2,
+       "bubble": "片 2｜offset=100",
+       "evil": true,
+       "hl": [
+        "Identification",
+        "Flags + Fragment Offset"
+       ],
+       "vals": {
+        "Identification": "0x1234 同组",
+        "Flags + Fragment Offset": "offset=100（第 800 字节）, MF=0"
+       },
+       "say": "第二片偏移写成 100，起点落在第一片内部，字段本身仍合法。",
+       "sub": "「偏移 + 长度」是否越过前一片，没有任何字段约束。"
+      },
+      {
+       "who": "受害者主机",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "重组：算长度",
+       "hl": [
+        "Flags + Fragment Offset",
+        "Fragment Data"
+       ],
+       "vals": {
+        "Flags + Fragment Offset": "offset=100",
+        "Fragment Data": "800（起点）− 1400（已写）"
+       },
+       "say": "重组时「本片起点减已写长度」得 −600，被当成巨大无符号数。",
+       "sub": "长度一算错，后面的拷贝就没有边界。"
+      },
+      {
+       "who": "受害者主机",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "按该长度 memcpy",
+       "hl": [
+        "Fragment Data",
+        "Total Length"
+       ],
+       "vals": {
+        "Fragment Data": "越界写",
+        "Total Length": "远超缓冲区"
+       },
+       "say": "按这个长度拷贝，堆或栈被写穿，协议栈崩溃、主机重启。",
+       "sub": "几个分片就能打掉一台主机，不必占带宽。"
+      },
+      {
+       "who": "受害者主机",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "队列残留",
+       "hl": [
+        "Identification",
+        "Flags + Fragment Offset"
+       ],
+       "vals": {
+        "Identification": "0x1234 仍在队列",
+        "Flags + Fragment Offset": "后续片继续错拼"
+       },
+       "say": "即使不崩溃，残留队列也会让后续合法分片继续错拼、持续丢包。",
+       "sub": "只发片不发全，同样能耗尽重组资源。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any 'ip[6:2] & 0x1fff != 0'",
+        "n": "只抓片偏移非 0 的分片，看它们是否首尾相接、有无重叠",
+        "s": "补充（vault 无 tcpdump，分片取证必备）"
+       },
+       {
+        "c": "nstat -az | grep -i reasm",
+        "n": "看 IpReasmReqds / IpReasmFails：失败数上涨说明收到异常或残缺分片",
+        "s": "补充（iproute2 的 nstat，比读 /proc/net/snmp 省事）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv4 | Select IPAddress,PrefixLength,InterfaceAlias",
+        "n": "列出本机地址与接口，确认哪块网卡在收分片",
+        "s": "《系统》PowerShell.md · Get-NetIPAddress"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh interface ipv4 show subinterfaces",
+        "n": "看各接口 MTU，判断多大的包会被切、切出来多少片",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "ping -l 1472 -f 8.8.8.8",
+        "n": "自己造一个 DF 大包，确认路径 MTU 与分片边界",
+        "s": "《系统》Windows CMD.md · ping"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "把伪造按在入口，把重叠片按在重组之前，把分片从源头消掉",
+   "lead": "两条思路：让伪造到不了（入口过滤），让重组不成立（重叠即丢、尽量不分片）。",
+   "scenes": [
+    {
+     "name": "入口过滤 + 重叠即丢 + 不分片",
+     "steps": [
+      {
+       "who": "接入路由器",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "uRPF：反查源地址",
+       "hl": [
+        "Source Address",
+        "Destination Address"
+       ],
+       "vals": {
+        "Source Address": "192.168.1.10（伪造）",
+        "Destination Address": "反向路由不指向此接口"
+       },
+       "say": "入口过滤拿源地址反查路由：对不上入接口就当场丢弃。",
+       "sub": "BCP38 + uRPF，让伪造在源头失败。"
+      },
+      {
+       "who": "边界防火墙",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "重叠片 → 整组丢弃",
+       "hl": [
+        "Flags + Fragment Offset",
+        "Identification"
+       ],
+       "vals": {
+        "Flags + Fragment Offset": "offset=100 与已收区间重叠",
+        "Identification": "0x1234 整组丢"
+       },
+       "say": "重叠分片一律整组丢弃，不合并也不覆盖，teardrop 失去前提。",
+       "sub": "同时给重组队列数与总长设硬上限。"
+      },
+      {
+       "who": "边界防火墙",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "源路由选项 → 丢弃",
+       "hl": [
+        "Options",
+        "IHL"
+       ],
+       "vals": {
+        "Options": "LSRR / SSRR",
+        "IHL": "7"
+       },
+       "say": "带源路由选项的报文在边界直接丢，借可信邻居绕 ACL 的路被掐掉。",
+       "sub": "源路由正常业务几乎不用，代价接近零。"
+      },
+      {
+       "who": "主机A",
+       "to": "网关R1",
+       "pkt": 0,
+       "bubble": "DF=1 按 MTU 发",
+       "hl": [
+        "Flags",
+        "Total Length"
+       ],
+       "vals": {
+        "Flags": "DF=1",
+        "Total Length": "1500"
+       },
+       "say": "发端置 DF 按 MTU 发包，收到 ICMP 3/4 再调小——从源头不分片。",
+       "sub": "不分片，就没有队列可污染、没有偏移可重叠。"
+      },
+      {
+       "who": "网关R1",
+       "to": "主机A",
+       "pkt": 0,
+       "bubble": "ICMP 3/4 报出下一跳 MTU",
+       "hl": [
+        "Total Length",
+        "Flags"
+       ],
+       "vals": {
+        "Total Length": "1420 重发",
+        "Flags": "DF=1"
+       },
+       "say": "按报出的 MTU 调小重发，直到不再收到「需要分片」的差错。",
+       "sub": "ICMP 全封会造成黑洞：能 ping 通、大包不通。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sysctl net.ipv4.conf.all.rp_filter net.ipv4.conf.eth0.rp_filter",
+        "n": "1 = 严格 uRPF（反查必须走同一接口），2 = 松散模式，0 = 关闭",
+        "s": "补充（vault 无 rp_filter 小节，源地址校验的开关）"
+       },
+       {
+        "c": "ping -M do -s 1472 8.8.8.8",
+        "n": "验证 PMTUD 生效：不报错说明路径 MTU 1500 且无需分片",
+        "s": "《系统》Linux.md · ping"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'ip[6:2] & 0x1fff != 0'",
+        "n": "过滤后应只剩零散合法分片；持续出现重叠片说明策略没生效",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv4 | Select IPAddress,PrefixLength",
+        "n": "核对本机前缀，作为「源地址该不该出现在这个网段」的判据",
+        "s": "《系统》PowerShell.md · Get-NetIPAddress"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh interface ipv4 show subinterfaces",
+        "n": "确认各接口 MTU，避免人为把 MTU 调小后又出现大量分片",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "ping -f -l 1472 8.8.8.8",
+        "n": "置 DF 探路，出现「需要拆分但设置了 DF」即该跳 MTU 偏小",
+        "s": "《系统》Windows CMD.md · ping"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,602 @@
+{
+ "id": "udp",
+ "notes": {
+  "Length": {
+   "short": "8 位首部里的总长，写错就骗解析器",
+   "more": "UDP 首部加数据的总长，不含 12 字节伪首部；最小 8、最大 65535，所以单个报文不超过 64 KB。接收方要核对 IP 总长减 IP 首部是否等于它。",
+   "sec": "长度写小会让多余字节被当成新报文（重叠/走私），写大则触发越界读或缓冲放大，是畸形报文最常用的一个字段。"
+  },
+  "Checksum": {
+   "short": "只防随机误码，不构成完整性",
+   "more": "对伪首部加首部加数据做 16 位反码求和再取反；数据为奇数长度时末字节右补 0x00 参与运算，补的字节不传输；结果为 0 须填 0xffff。",
+   "sec": "IPv4 允许填 0 表示不校验，IPv6 强制要求；即便计算，攻击者也能自行算对，所以它不构成任何安全边界。"
+  },
+  "Data": {
+   "short": "原封不动交给应用，明文可读",
+   "more": "UDP 保留应用交下来的报文边界，既不合也不拆。本例是 29 字节 DNS 查询：事务 ID、标志、问题数，然后是长度前缀编码的域名与 QTYPE。",
+   "sec": "载荷明文，是流量识别与指纹学习的依据；反过来攻击者可用随机填充让指纹失效，也可以用 ANY 查询把响应做大。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "8 个字节的首部，发出去就算完事：一次 DNS 查询的全过程",
+   "lead": "UDP 没有握手可看，所以这一幕要盯的是两件事：首部里只有 4 个字段，以及校验和为什么必须借 IP 地址。",
+   "scenes": [
+    {
+     "name": "一次 DNS 查询：8 字节就把话说完了",
+     "steps": [
+      {
+       "who": "客户端",
+       "to": "DNS 服务器",
+       "pkt": 0,
+       "bubble": "DNS QUERY",
+       "hl": [
+        "Source Port",
+        "Destination Port",
+        "Length"
+       ],
+       "vals": {
+        "Source Port": "50000",
+        "Destination Port": "53",
+        "Length": "0x0025（37 字节）"
+       },
+       "say": "不握手、不建状态，8 字节首部后面直接跟 29 字节查询就发出去了。",
+       "sub": "省掉的握手，代价是丢失、乱序、重复全部由应用自己承担。"
+      },
+      {
+       "who": "DNS 服务器",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "DNS ANSWER",
+       "hl": [
+        "Source Port",
+        "Destination Port",
+        "Data"
+       ],
+       "vals": {
+        "Source Port": "53",
+        "Destination Port": "50000",
+        "Data": "应答：两个端口对调即可回信"
+       },
+       "say": "回包只是把源端口与目的端口对调；服务器没为这次查询留下任何状态。",
+       "sub": "同一句话可以说给任何源地址听——这正是反射放大要用的性质。"
+      },
+      {
+       "who": "客户端",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "算校验和",
+       "hl": [
+        "Source Address",
+        "Destination Address",
+        "Protocol",
+        "UDP Length"
+       ],
+       "vals": {
+        "Source Address": "192.168.1.100",
+        "Destination Address": "8.8.8.8",
+        "Protocol": "17 = UDP",
+        "UDP Length": "0x0025（与首部一致）"
+       },
+       "say": "校验和要把 12 字节伪首部临时拼在前面一起算，IP 地址因此也进了校验。",
+       "sub": "伪首部不上线；地址被改写而校验没重算，报文必被丢弃。"
+      },
+      {
+       "who": "客户端",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "0x8069",
+       "hl": [
+        "Checksum",
+        "Data"
+       ],
+       "vals": {
+        "Checksum": "0x8069",
+        "Data": "29 字节（奇数）→ 末字节右补 0x00"
+       },
+       "say": "载荷是奇数长度，末字节补一个 0x00 凑成 16 位字；补的字节并不传输。",
+       "sub": "结果算成 0 必须填 0xffff，因为全 0 表示「发送方没算校验和」。"
+      },
+      {
+       "who": "受害者主机",
+       "to": "客户端",
+       "pkt": 0,
+       "bubble": "ICMP 不可达",
+       "hl": [
+        "Destination Port",
+        "Length"
+       ],
+       "vals": {
+        "Destination Port": "0x0035 = 53（假设该主机无人监听）",
+        "Length": "0x0025"
+       },
+       "say": "端口没人监听，内核丢包并回 ICMP 端口不可达（type 3 code 3）。",
+       "sub": "这个回包本身就是扫描器的判定依据：有回包说明主机活着。"
+      },
+      {
+       "who": "客户端",
+       "to": "服务器",
+       "pkt": 0,
+       "bubble": "1472 B",
+       "hl": [
+        "Length",
+        "Data"
+       ],
+       "vals": {
+        "Length": "0x05dc（1500，超 MTU）",
+        "Data": "1472 字节载荷 → 触发 IP 分片"
+       },
+       "say": "报文超过路径 MTU 就交给 IP 分片；任一分片丢失，整包在应用层等于没到。",
+       "sub": "面向报文意味着报文大小是应用必须自己做的决定，UDP 不替你拆。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any 'udp port 53'",
+        "n": "一问一答两个包，8 字节首部加明文载荷全部可见",
+        "s": "补充（vault 无 tcpdump，抓包必备）"
+       },
+       {
+        "c": "ss -uanp",
+        "n": "本机监听的 UDP 端点与所属进程，-p 需要 root 才显示进程",
+        "s": "《系统》Linux.md · ss"
+       },
+       {
+        "c": "dig example.com @8.8.8.8 +short",
+        "n": "最短的一次查询，配合 tcpdump 对比请求与响应的字节数",
+        "s": "补充（dig 属 bind-utils，vault 未收录）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Resolve-DnsName example.com -Server 8.8.8.8 -Type A",
+        "n": "等价于 dig，验证到 53/UDP 的通路是否可用",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       },
+       {
+        "c": "Get-NetUDPEndpoint | Select LocalAddress,LocalPort,OwningProcess",
+        "n": "本机全部 UDP 监听端点及其 PID",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "nslookup example.com 8.8.8.8",
+        "n": "交互式查一次，回显里能看到用的是 53 端口",
+        "s": "《系统》Windows CMD.md · nslookup"
+       },
+       {
+        "c": "netstat -ano -p UDP",
+        "n": "UDP 端点清单与 PID，看谁在监听 53/123/11211",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "伪造源地址 + 小请求大响应 = 反射放大；没有握手 = 扫描只能靠回包猜",
+   "lead": "攻击者只改了一个字段：源 IP。剩下的全由协议自己的性质完成。",
+   "scenes": [
+    {
+     "name": "反射放大：几十字节换几万字节",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "全网",
+       "pkt": 0,
+       "bubble": "找放大器",
+       "evil": true,
+       "hl": [
+        "Destination Port",
+        "Length"
+       ],
+       "vals": {
+        "Destination Port": "53 / 123 / 11211",
+        "Length": "最小请求"
+       },
+       "say": "先扫全网找开放的 UDP 服务：开放递归 DNS、NTP、Memcached 11211。",
+       "sub": "挑的都是「小请求、大响应」的服务，它们本身就是放大器。"
+      },
+      {
+       "who": "攻击者",
+       "to": "反射器",
+       "pkt": 0,
+       "bubble": "源=受害者",
+       "evil": true,
+       "hl": [
+        "Source Port",
+        "Destination Port",
+        "Data"
+       ],
+       "vals": {
+        "Source Port": "随机（让按会话限速失效）",
+        "Destination Port": "11211",
+        "Data": "stats\\r\\n（约 15 字节）"
+       },
+       "say": "把源 IP 写成受害者地址发一个十几字节的请求，源端口每次随机。",
+       "sub": "UDP 不握手，反射器没有任何机会验证源地址真伪。"
+      },
+      {
+       "who": "反射器",
+       "to": "受害者",
+       "pkt": 0,
+       "bubble": "数十 KB",
+       "hl": [
+        "Source Port",
+        "Destination Port",
+        "Length"
+       ],
+       "vals": {
+        "Source Port": "11211",
+        "Destination Port": "受害者的随机高端口",
+        "Length": "数 KB ~ 数十 KB"
+       },
+       "say": "响应打在受害者身上：Memcached 到万倍，DNS ANY 与 DNSSEC 也能几十倍。",
+       "sub": "放大倍数只看协议的不对称性，与攻击者自己的带宽无关。"
+      },
+      {
+       "who": "攻击者",
+       "to": "数万台反射器",
+       "pkt": 1,
+       "bubble": "伪造源地址",
+       "evil": true,
+       "hl": [
+        "Source Address",
+        "Destination Address",
+        "UDP Length"
+       ],
+       "vals": {
+        "Source Address": "受害者 V（伪造）",
+        "Destination Address": "反射器 R",
+        "UDP Length": "请求很小"
+       },
+       "say": "规模化：同一时刻向数万台反射器发同一请求，响应在受害者处线性叠加。",
+       "sub": "伪造源在计算上毫无障碍——攻击者本地就能把校验和算对。"
+      },
+      {
+       "who": "受害者",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "打满",
+       "hl": [
+        "Destination Port",
+        "Length"
+       ],
+       "vals": {
+        "Destination Port": "全部随机，无从限速",
+        "Length": "入向带宽被打满"
+       },
+       "say": "受害者只看到反射器的地址：封它等于自断 DNS/NTP，溯源与反制同时失效。",
+       "sub": "三重收益：流量放大、源地址隐藏、带宽由反射器代付。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any 'udp and src port 11211'",
+        "n": "反射的形状：源端口固定 11211、目的端口随机、源 IP 是一堆不相干服务器",
+        "s": "补充（抓包必备）"
+       },
+       {
+        "c": "sudo ss -uanp | grep -E ':(53|123|11211)\\b'",
+        "n": "本机是否在跑放大器；有输出就该关 UDP 或加访问控制",
+        "s": "《系统》Linux.md · ss"
+       },
+       {
+        "c": "dig +short ANY isc.org @8.8.8.8",
+        "n": "ANY 的响应远大于请求，这就是 DNS 放大比的来源",
+        "s": "补充（dig 属 bind-utils）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetUDPEndpoint | Where-Object LocalPort -in 53,123,11211",
+        "n": "本机暴露的放大类 UDP 端口清单",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       },
+       {
+        "c": "Resolve-DnsName isc.org -Type ANY -Server 8.8.8.8",
+        "n": "一次 ANY 响应有多少条记录，直观感受放大倍数",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "nslookup -type=ANY isc.org 8.8.8.8",
+        "n": "ANY 查询，响应条数远多于请求字节",
+        "s": "《系统》Windows CMD.md · nslookup"
+       },
+       {
+        "c": "netstat -ano -p UDP | findstr \":11211\"",
+        "n": "本机有没有把 Memcached 的 UDP 口暴露出去",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    },
+    {
+     "name": "UDP 扫描：没有握手，只能靠回包差异猜",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "受害者",
+       "pkt": 0,
+       "bubble": "空载荷",
+       "evil": true,
+       "hl": [
+        "Destination Port",
+        "Length",
+        "Checksum"
+       ],
+       "vals": {
+        "Destination Port": "1~1024 逐个试",
+        "Length": "0x0008（纯首部）",
+        "Checksum": "0x0000（IPv4 允许不校验）"
+       },
+       "say": "发空载荷探测包，甚至把校验和填 0：构造成本比 TCP 扫描还低。",
+       "sub": "没有三次握手，扫描器拿不到「端口开着」这种直接信号。"
+      },
+      {
+       "who": "受害者",
+       "to": "攻击者",
+       "pkt": 0,
+       "bubble": "回包差异",
+       "hl": [
+        "Source Port",
+        "Destination Port",
+        "Data"
+       ],
+       "vals": {
+        "Source Port": "被探测的端口",
+        "Destination Port": "扫描器的源端口",
+        "Data": "开=应用回包；关=ICMP 3/3"
+       },
+       "say": "判定只能靠差异：开放端口回应用层应答，关闭端口回 ICMP 端口不可达。",
+       "sub": "防火墙静默丢弃时两种都没回包，只能标「开放或被过滤」。"
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "重试 ×3",
+       "evil": true,
+       "hl": [
+        "Destination Port",
+        "Length"
+       ],
+       "vals": {
+        "Destination Port": "无回包的那些",
+        "Length": "同一探测重发"
+       },
+       "say": "对无回包的端口重试并延长超时；速率高了丢包误判，低了扫不完。",
+       "sub": "UDP 扫描天然不可靠，这是它比 TCP 扫描慢得多的根本原因。"
+      },
+      {
+       "who": "攻击者",
+       "to": "命中的端口",
+       "pkt": 0,
+       "bubble": "协议指纹",
+       "evil": true,
+       "hl": [
+        "Destination Port",
+        "Data"
+       ],
+       "vals": {
+        "Destination Port": "命中的端口",
+        "Data": "SNMP public / NTP monlist / stats"
+       },
+       "say": "命中后再发协议特定载荷确认服务与版本，直接对接放大或已知漏洞。",
+       "sub": "端口号不等于服务，只有协议指纹才认得出改过端口的放大器。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo nmap -sU -p 53,123,161,1900,11211 --open 192.168.1.0/24",
+        "n": "-sU 是 UDP 扫描，慢且需要 root；--open 只列出有响应的端口",
+        "s": "补充（vault 无 nmap，UDP 扫描只有它实用）"
+       },
+       {
+        "c": "sudo nmap -sU -p 11211 --script memcached-info 203.0.113.9",
+        "n": "确认 Memcached 是否响应，直接判定它能不能当反射器",
+        "s": "补充（nmap NSE 脚本）"
+       },
+       {
+        "c": "sudo ss -uanp",
+        "n": "防护侧自查：本机到底开了哪些 UDP 端口",
+        "s": "《系统》Linux.md · ss"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetUDPEndpoint | Group-Object LocalPort | Sort-Object Count -Descending",
+        "n": "按端口聚合，看本机 UDP 暴露面集中在哪几个端口",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       },
+       {
+        "c": "Test-NetConnection 192.168.1.9 -InformationLevel Detailed",
+        "n": "看 ICMP 层可达性；UDP 端口开没开还要靠协议回包判断",
+        "s": "《系统》PowerShell.md · Test-NetConnection"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netstat -ano -p UDP | findstr LISTENING",
+        "n": "UDP 端点没有连接状态，列出的是绑定记录",
+        "s": "《系统》Windows CMD.md · netstat"
+       },
+       {
+        "c": "nslookup -type=SRV _ldap._tcp.example.com 192.168.1.9",
+        "n": "对候选端口发一次协议请求，看是否有应用层应答",
+        "s": "《系统》Windows CMD.md · nslookup"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "同一场反射重放一遍：这次伪造源出不了门，放大器也不存在了",
+   "lead": "防护的重点全在攻击者的起点与反射器，而不是受害者的收包口。",
+   "scenes": [
+    {
+     "name": "BCP38 挡住伪造源，关服务拆掉放大器",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "反射器",
+       "pkt": 1,
+       "bubble": "伪造源",
+       "evil": true,
+       "hl": [
+        "Source Address",
+        "Destination Address"
+       ],
+       "vals": {
+        "Source Address": "不属于本网段（伪造）",
+        "Destination Address": "反射器 R"
+       },
+       "say": "攻击原样重放：源地址依旧伪造，请求依旧只有十几字节。",
+       "sub": "要动的不是受害者的收包口，而是「伪造源能出门」这件事。"
+      },
+      {
+       "who": "边界网关",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "BCP38 丢弃",
+       "hl": [
+        "Source Address",
+        "Protocol"
+       ],
+       "vals": {
+        "Source Address": "不属于本网段 → 直接丢弃",
+        "Protocol": "17 = UDP"
+       },
+       "say": "边界做入出过滤：源地址不属于本网段的包一律丢，伪造源根本出不了门。",
+       "sub": "这是唯一釜底抽薪的手段；只在受害者侧限流只能压症状。"
+      },
+      {
+       "who": "反射器",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "关掉放大器",
+       "hl": [
+        "Destination Port",
+        "Length"
+       ],
+       "vals": {
+        "Destination Port": "11211 不再监听",
+        "Length": "—"
+       },
+       "say": "反射器侧关掉不必要的 UDP：Memcached 只听 127.0.0.1，NTP 关 monlist。",
+       "sub": "DNS 关开放递归。放大器不存在，放大倍数就无从谈起。"
+      },
+      {
+       "who": "清洗设备",
+       "to": "受害者",
+       "pkt": 0,
+       "bubble": "多维限流",
+       "hl": [
+        "Destination Port",
+        "Source Port"
+       ],
+       "vals": {
+        "Destination Port": "目标 IP + 源端口 11211",
+        "Source Port": "同一反射器端口"
+       },
+       "say": "清洗侧按「目标 IP + 源端口」限速：反射的形状是同目标、同源端口、海量源 IP。",
+       "sub": "再叠加源 IP、目标 IP、目标端口几个维度，单维总有绕过路径。"
+      },
+      {
+       "who": "受害者",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "只剩合法流量",
+       "hl": [
+        "Data",
+        "Checksum"
+       ],
+       "vals": {
+        "Data": "指纹不匹配即丢",
+        "Checksum": "正常查询照常通过"
+       },
+       "say": "剩下的正常 DNS 查询照常通过：目标不是断网，是让攻击不划算。",
+       "sub": "指纹对随机填充无效、限流对变异无效，两者必须组合使用。"
+      },
+      {
+       "who": "受害者",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "扫描失去信号",
+       "hl": [
+        "Destination Port",
+        "Checksum"
+       ],
+       "vals": {
+        "Destination Port": "未开放 → 默认丢弃、不回 ICMP",
+        "Checksum": "—"
+       },
+       "say": "入向 UDP 默认拒绝、ICMP 不可达限速：扫描拿不到回包差异，只能标「被过滤」。",
+       "sub": "开放端口清单收敛后，放大器和入口一起消失。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo sysctl -w net.ipv4.conf.all.rp_filter=1",
+        "n": "反向路径过滤（松散 uRPF）：源地址回不去的包直接丢",
+        "s": "补充（内核参数）"
+       },
+       {
+        "c": "sudo iptables -A INPUT -p udp --dport 11211 -j DROP",
+        "n": "堵掉放大器入口；本机跑 Memcached 时先禁 UDP 再谈其他",
+        "s": "补充（iptables 不在 vault）"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'udp and not port 53'",
+        "n": "防护后复看：非 53 的 UDP 入向流量应显著下降",
+        "s": "补充（抓包必备）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "New-NetFirewallRule -DisplayName 'Block-UDP-11211' -Direction Inbound -Protocol UDP -LocalPort 11211 -Action Block",
+        "n": "入向封掉 11211/UDP，等于掐掉一台放大器",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       },
+       {
+        "c": "Get-NetUDPEndpoint | Where-Object LocalPort -eq 11211",
+        "n": "复核：规则生效后不应再有该端点监听",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall firewall add rule name=\"Block-UDP-11211\" dir=in action=block protocol=UDP localport=11211",
+        "n": "与图形界面等价的命令行写法",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "netstat -ano -p UDP | findstr \":11211\"",
+        "n": "复查放大器是否真的关了",
+        "s": "《系统》Windows CMD.md · netstat"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

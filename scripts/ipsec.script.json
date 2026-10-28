@@ -1,0 +1,602 @@
+{
+ "id": "ipsec",
+ "notes": {
+  "Next Header": {
+   "short": "后面装的是什么协议",
+   "more": "8 位。AH 里它指向被保护的上层（6 TCP、17 UDP、4 IPv4）；ESP 里它在尾部，解密去填充后才读得到，决定载荷交给谁处理。IPv6 的扩展首部链也靠它串起来。",
+   "sec": "值被改会让解析错位，接收端把数据交给错的协议处理。"
+  },
+  "SPI": {
+   "short": "32 位安全参数索引，选 SA 用",
+   "more": "与目的 IP、安全协议标识（AH/ESP）三元组唯一标识一条 SA。接收方靠它在 SAD 里找到「这份报文该用哪套算法与密钥」，同一 SA 内 SPI 相同。",
+   "sec": "SPI 是明文，可被用来探测哪些 SA 存在、哪些被丢弃。"
+  },
+  "ICV": {
+   "short": "完整性校验值，长度由算法定",
+   "more": "AH 的 ICV 覆盖整个 IP 包（易变字段除外）；ESP 的 ICV 只覆盖 SPI 到下一个首部，不含外层新首部。长度须为 32 位整数倍，常见 96 或 128 位截断。",
+   "sec": "没有 ICV（只加密不认证）的 ESP 可被翻转字节，改动会直达明文。"
+  },
+  "Exchange Type": {
+   "short": "34 建 SA / 35 认证",
+   "more": "8 位。34 = IKE_SA_INIT，明文协商算法并交换 DH 公钥；35 = IKE_AUTH，加密传身份做认证；36 建子 SA；37 负责删除与保活。",
+   "sec": "记下 34/35 两包，就够做离线 PSK 字典爆破。"
+  },
+  "Initiator's SPI": {
+   "short": "发起方 SPI，不得为 0",
+   "more": "64 位，标识这次 IKE 交换的发起方。首个报文中响应方 SPI 必须填 0，之后由响应方补上自己的值，两边用这一对 SPI 认这条 IKE SA。",
+   "sec": "SPI 可预测时，攻击者能抢先插入自己的交换。"
+  },
+  "Transform Type": {
+   "short": "加密/PRF/完整性/DH",
+   "more": "8 位，每个 Transform 说明自己在协商什么：1 = ENCR 加密，2 = PRF 伪随机函数，3 = INTEG 完整性，4 = DH 组，5 = ESN 扩展序号。",
+   "sec": "只看协商了 ENCR 没协商 INTEG，就知道这条 SA 可被翻转。"
+  },
+  "Pad Length": {
+   "short": "填充了多少字节",
+   "more": "8 位，配合填充字段把明文凑成加密算法要求的块长，并隐藏真实长度。接收端解密后按它截掉尾部，再读下一个首部决定交给谁。",
+   "sec": "改这个值会让去填充错位，明文边界随之偏移。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "IKE 谈好算法与密钥，AH/ESP 按合同逐包处理",
+   "lead": "IPSec 不改应用，只在 IP 层补一层。先看三个包：IKE 协商、AH 认证、ESP 加密，再看接收端怎么按 SA 把它拆开。",
+   "scenes": [
+    {
+     "name": "IKE 谈合同 → AH / ESP 执行",
+     "steps": [
+      {
+       "who": "发起方",
+       "to": "响应方",
+       "pkt": 2,
+       "bubble": "IKE_SA_INIT｜Exchange 34",
+       "hl": [
+        "Initiator's SPI",
+        "Responder's SPI",
+        "Exchange Type",
+        "Next Payload",
+        "Length"
+       ],
+       "vals": {
+        "Initiator's SPI": "0x1122334455667788",
+        "Responder's SPI": "0（首个报文）",
+        "Exchange Type": "34（IKE_SA_INIT）",
+        "Next Payload": "33（SA）",
+        "Length": "48"
+       },
+       "say": "先谈合同：IKE_SA_INIT 交算法提案与 DH 公钥，此时一切都还没加密。",
+       "sub": "长度字段层层嵌套：IKE 头、SA、Proposal、Transform。"
+      },
+      {
+       "who": "安全网关A",
+       "to": "安全网关B",
+       "pkt": 0,
+       "bubble": "AH｜协议 51，整包摘要",
+       "hl": [
+        "Outer IPv4 Header",
+        "Next Header",
+        "SPI",
+        "Sequence Number",
+        "ICV"
+       ],
+       "vals": {
+        "Outer IPv4 Header": "协议字段 = 51",
+        "Next Header": "6（TCP）",
+        "SPI": "0x2f4a8b01",
+        "Sequence Number": "1",
+        "ICV": "12 字节截断"
+       },
+       "say": "AH 给整包做摘要，连源地址一起算——地址被改就验不过。",
+       "sub": "代价是它穿不过 NAT，而且不加密。"
+      },
+      {
+       "who": "安全网关A",
+       "to": "安全网关B",
+       "pkt": 1,
+       "bubble": "ESP｜协议 50，整段加密",
+       "hl": [
+        "Outer IPv4 Header",
+        "SPI",
+        "Sequence Number",
+        "Payload Data"
+       ],
+       "vals": {
+        "Outer IPv4 Header": "协议字段 = 50",
+        "SPI": "0x2f4a8b02",
+        "Sequence Number": "1",
+        "Payload Data": "原始 IP 数据报整段加密"
+       },
+       "say": "ESP 把整个原始数据报加密，外面只留 SPI 与序号。",
+       "sub": "隧道模式下新加的外层首部不加密，路由器才转得动。"
+      },
+      {
+       "who": "安全网关B",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "验 ICV → 去填充 → 解密",
+       "hl": [
+        "Padding",
+        "Pad Length",
+        "Next Header",
+        "ICV"
+       ],
+       "vals": {
+        "Padding": "6 字节全 0",
+        "Pad Length": "6",
+        "Next Header": "4（IPv4）",
+        "ICV": "校验通过"
+       },
+       "say": "接收端先验 ICV、查序号，再去填充解密，按下一个首部交回 IP。",
+       "sub": "四步顺序固定，任何一步失败整包丢弃。"
+      },
+      {
+       "who": "安全网关B",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "抗重放：序号 + 窗口",
+       "hl": [
+        "SPI",
+        "Sequence Number"
+       ],
+       "vals": {
+        "SPI": "0x2f4a8b01",
+        "Sequence Number": "窗口内 → 接受；重复 → 丢弃"
+       },
+       "say": "序号单调递增，配合抗重放窗口：重放的包连解密机会都没有。",
+       "sub": "32 位耗尽前必须换密钥，否则要用扩展序号。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo ip xfrm state list",
+        "n": "SAD：每条 SA 的 SPI、算法、密钥与生存期，IPSec 的「合同」都在这",
+        "s": "补充（iproute2 的 xfrm 子命令，vault 无）"
+       },
+       {
+        "c": "sudo ip xfrm policy list",
+        "n": "SPD：哪些流要 IPSec（apply）、哪些绕过（bypass）、哪些直接丢",
+        "s": "补充（iproute2 的 xfrm 子命令，vault 无）"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'ip proto 50 or ip proto 51'",
+        "n": "只看 ESP/AH：内容不可读，能读到 SPI 与序号，判断有没有在跑",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPsecRule | Select-Object DisplayName,Enabled",
+        "n": "本机 IPSec 连接安全规则清单，等价于 SPD 的可视化",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall consec show rule name=all",
+        "n": "列出连接安全规则（要求认证/加密的流量），看哪些流被要求 IPSec",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "netsh advfirewall monitor show mmsa",
+        "n": "主模式安全关联：对端、算法与 SPI，隧道通不通先看这张表",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "只加密不认证的 ESP 可翻字节；弱 PSK 可离线爆破",
+   "lead": "两招都不碰算法本身：一招打「认证缺失」的配置错配，一招打「共享秘密」的人为弱点。",
+   "scenes": [
+    {
+     "name": "ESP 位翻转：只加密不认证就等于没认证",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "旁路抓包，先看 SA 有没有认证",
+       "evil": true,
+       "hl": [
+        "SPI",
+        "Sequence Number",
+        "Payload Data",
+        "ICV"
+       ],
+       "vals": {
+        "SPI": "0x2f4a8b02",
+        "Sequence Number": "1",
+        "Payload Data": "抓到的密文",
+        "ICV": "长度 0 → 没协商完整性"
+       },
+       "say": "先确认这条 SA 只协商了加密：ICV 字段缺失或从来不被校验。",
+       "sub": "AES-CBC 单独使用时，正是这种错配的典型。"
+      },
+      {
+       "who": "攻击者",
+       "to": "安全网关B",
+       "pkt": 1,
+       "bubble": "翻转第 n 块的一个字节",
+       "evil": true,
+       "hl": [
+        "Sequence Number",
+        "Payload Data"
+       ],
+       "vals": {
+        "Sequence Number": "1（不变）",
+        "Payload Data": "密文第 n 块某字节 ^= 0x01"
+       },
+       "say": "翻转密文一个字节：长度、序号都不变，路径上没有字段能提示改动。",
+       "sub": "CBC 下会连带影响下一块，改动是可预测的。"
+      },
+      {
+       "who": "安全网关B",
+       "to": "内网服务器",
+       "pkt": 1,
+       "bubble": "解密后直接交给上层",
+       "hl": [
+        "Payload Data",
+        "ICV",
+        "Next Header"
+       ],
+       "vals": {
+        "Payload Data": "明文被改掉一字节",
+        "ICV": "无 → 不校验",
+        "Next Header": "4（IPv4）"
+       },
+       "say": "没有 ICV 就没有完整性校验，被改的明文直接进了内网。",
+       "sub": "内层若是明文协议，改一字节就改了语义。"
+      },
+      {
+       "who": "攻击者",
+       "to": "安全网关B",
+       "pkt": 1,
+       "bubble": "再截断末尾若干块",
+       "evil": true,
+       "hl": [
+        "Payload Data",
+        "Padding",
+        "Pad Length"
+       ],
+       "vals": {
+        "Payload Data": "删掉密文末尾若干块",
+        "Padding": "跟随调整",
+        "Pad Length": "改小"
+       },
+       "say": "再截断：删掉末尾密文并调长度字段，得到一段被截短的明文。",
+       "sub": "上层会解析出异常长度或错误状态。"
+      },
+      {
+       "who": "内网服务器",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "按被改的数据执行",
+       "hl": [
+        "Next Header",
+        "Payload Data"
+       ],
+       "vals": {
+        "Next Header": "4（IPv4）",
+        "Payload Data": "改收款账号 / 改 DNS 应答 / 注入命令"
+       },
+       "say": "改一个字节就能改收款账号或 DNS 应答，全程不需要密钥。",
+       "sub": "攻击者只需知道明文格式，不必破解算法。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any -X 'ip proto 50'",
+        "n": "把 ESP 密文按十六进制打出来，看清 SPI、序号与密文的边界",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo ip xfrm state list | grep -Ei 'auth|enc'",
+        "n": "只有 enc 没有 auth，就是可翻转的 SA——先查这条再谈其它",
+        "s": "补充（iproute2 的 xfrm 子命令，vault 无）"
+       },
+       {
+        "c": "sudo ip xfrm state list | grep -c auth",
+        "n": "数一下配了 auth 的 SA 条数，0 说明整机都在裸加密",
+        "s": "补充（iproute2 的 xfrm 子命令，vault 无）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPsecRule | Select-Object DisplayName,AuthenticationMethod",
+        "n": "看每条规则的认证方法；为空或 None 意味着只加密不认证",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall consec show rule name=all",
+        "n": "规则详情里看「要求认证」这一项是否被勾选",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    },
+    {
+     "name": "IKE PSK 爆破：抓一次交换，离线猜密码",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "抓 IKE_SA_INIT + IKE_AUTH",
+       "evil": true,
+       "hl": [
+        "Exchange Type",
+        "Initiator's SPI",
+        "Flags",
+        "Message ID"
+       ],
+       "vals": {
+        "Exchange Type": "34 → 35（两次交换都要）",
+        "Initiator's SPI": "0x1122334455667788",
+        "Flags": "I（发起方）",
+        "Message ID": "0"
+       },
+       "say": "被动记录一次 IKE_SA_INIT 与 IKE_AUTH，全程不与对端交互。",
+       "sub": "INIT 明文，AUTH 加密——爆破的原料都在里面。"
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "取 Ni、Nr 与 DH 公钥",
+       "hl": [
+        "Next Payload",
+        "Length",
+        "SA Payload Length"
+       ],
+       "vals": {
+        "Next Payload": "33（SA）",
+        "Length": "48",
+        "SA Payload Length": "16"
+       },
+       "say": "从明文报文里取出随机数与 DH 公钥，离线算出共享秘密。",
+       "sub": "DH 公钥可离线计算，不需要和网关说一句话。"
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "对字典逐个候选 PSK 算 AUTH",
+       "hl": [
+        "Transform Type",
+        "Transform ID",
+        "Protocol ID"
+       ],
+       "vals": {
+        "Transform Type": "2（PRF）/ 3（INTEG）",
+        "Transform ID": "协商出的算法",
+        "Protocol ID": "1（IKE）"
+       },
+       "say": "对每个候选 PSK 算一遍 AUTH，与抓到的值逐字节比对。",
+       "sub": "纯离线，不受网关限速，也不产生登录失败日志。"
+      },
+      {
+       "who": "攻击者",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "命中：拿到 PSK",
+       "hl": [
+        "Initiator's SPI",
+        "Responder's SPI"
+       ],
+       "vals": {
+        "Initiator's SPI": "0x1122334455667788",
+        "Responder's SPI": "响应方 SPI"
+       },
+       "say": "字典够好就会命中：拿到 PSK 就能解出这次交换派生的子 SA。",
+       "sub": "若同时抓到 ESP 流量，历史业务数据一并被解密。"
+      },
+      {
+       "who": "攻击者",
+       "to": "安全网关B",
+       "pkt": 2,
+       "bubble": "用同一 PSK 发起 IKE_AUTH",
+       "evil": true,
+       "hl": [
+        "Exchange Type",
+        "Initiator's SPI",
+        "Flags"
+       ],
+       "vals": {
+        "Exchange Type": "35（IKE_AUTH）",
+        "Initiator's SPI": "自己的新 SPI",
+        "Flags": "I（发起方）"
+       },
+       "say": "拿同一 PSK 发起 IKE_AUTH，直接冒充合法分支接入内网。",
+       "sub": "共享秘密一处泄露，等于所有分支的门都开了。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo tcpdump -ni any 'udp port 500' -w ike.pcap",
+        "n": "把 IKE 交换落盘，后续离线爆破与复盘都用这份 pcap",
+        "s": "补充（vault 无 tcpdump）"
+       },
+       {
+        "c": "sudo ike-scan --aggressive --pskcrack=psk.txt 10.2.2.2",
+        "n": "主动探测网关支持的 IKE 参数并抓取可爆破的哈希（仅授权环境）",
+        "s": "补充（ike-scan，vault 无）"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'udp port 4500'",
+        "n": "NAT-T 封装的 ESP 走 4500，抓不到 500 时改看这个端口",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPsecMainModeSA | Select-Object Name,LocalAddress,RemoteAddress",
+        "n": "当前主模式 SA：对端是谁、用哪种认证（PSK 还是证书）",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall monitor show mmsa",
+        "n": "主模式关联与认证方式，PSK 的条目一眼可辨",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "把完整性变成必选项，把共享秘密换成证书",
+   "lead": "防守点只有两个：SA 里必须同时有 ENCR 与 INTEG（或用 AEAD 合一），身份认证不要靠一把人人皆知的 PSK。",
+   "scenes": [
+    {
+     "name": "强制完整性 + 换掉共享秘密",
+     "steps": [
+      {
+       "who": "安全网关B",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "ICV 验不过 → 整包丢弃",
+       "hl": [
+        "ICV",
+        "Payload Data",
+        "Sequence Number"
+       ],
+       "vals": {
+        "ICV": "96 位，与摘要不符",
+        "Payload Data": "改过的密文",
+        "Sequence Number": "1"
+       },
+       "say": "ESP 必须同时启用完整性：开了 ICV，翻转一字节就当场验不过。",
+       "sub": "这是把「只加密」这条错配从 SA 里彻底去掉。"
+      },
+      {
+       "who": "安全网关B",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "改用 AEAD：加密与认证合一",
+       "hl": [
+        "Payload Data",
+        "Padding",
+        "Pad Length"
+       ],
+       "vals": {
+        "Payload Data": "AES-GCM 一次算出密文与标签",
+        "Padding": "按块长凑齐",
+        "Pad Length": "6"
+       },
+       "say": "直接上 AEAD，加密与认证一步完成，没有「只加密」的错配空间。",
+       "sub": "分两步做既慢又容易漏，工程正解是合一。"
+      },
+      {
+       "who": "安全网关B",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "协商时就锁死算法",
+       "hl": [
+        "Transform Type",
+        "Transform ID",
+        "Protocol ID"
+       ],
+       "vals": {
+        "Transform Type": "1（ENCR）→ 要求 AEAD",
+        "Transform ID": "AES-GCM",
+        "Protocol ID": "3（ESP）"
+       },
+       "say": "在 SA 提案里只允许 AEAD 与强 PRF，弱组合根本协商不出来。",
+       "sub": "算法可替换正是这套框架能活三十年的原因。"
+      },
+      {
+       "who": "安全网关B",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "IKE_AUTH 改证书/EAP",
+       "hl": [
+        "Exchange Type",
+        "Initiator's SPI"
+       ],
+       "vals": {
+        "Exchange Type": "35（IKE_AUTH）",
+        "Initiator's SPI": "校验对端证书链"
+       },
+       "say": "用 X.509 证书或 EAP-TLS 替代 PSK：没有共享秘密可拿来爆破。",
+       "sub": "必须用 PSK 时，一对等体一把高熵密钥并定期轮换。"
+      },
+      {
+       "who": "安全网关B",
+       "to": "—",
+       "pkt": 2,
+       "bubble": "冒充分支：AUTH 校验失败",
+       "hl": [
+        "Initiator's SPI",
+        "Flags",
+        "Message ID"
+       ],
+       "vals": {
+        "Initiator's SPI": "陌生发起方",
+        "Flags": "I",
+        "Message ID": "不匹配"
+       },
+       "say": "闭环：没有 PSK 也没有证书，AUTH 就过不了，历史流量也解不开。",
+       "sub": "再配合关闭弱 DH 组，离线预计算也一起失效。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo ip xfrm state list",
+        "n": "逐条核对：auth 非空、算法是 AEAD、序号窗口已启用",
+        "s": "补充（iproute2 的 xfrm 子命令，vault 无）"
+       },
+       {
+        "c": "sudo ip xfrm policy list",
+        "n": "确认敏感流命中 apply 而不是 bypass，否则加密形同虚设",
+        "s": "补充（iproute2 的 xfrm 子命令，vault 无）"
+       },
+       {
+        "c": "sudo tcpdump -ni any 'udp port 500 or udp port 4500'",
+        "n": "看 IKE 与 NAT-T 是否正常；重建失败的隧道会反复重试",
+        "s": "补充（vault 无 tcpdump）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPsecRule | Select-Object DisplayName,AuthenticationMethod,Enabled",
+        "n": "核对每条规则的认证方式：Certificate 优于 PSK，None 属高危",
+        "s": "《系统》PowerShell.md · 网络管理 Cmdlet"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh advfirewall monitor show mmsa",
+        "n": "主模式关联的认证方式与算法，巡检时一眼看出谁是 PSK",
+        "s": "《系统》Windows CMD.md · netsh"
+       },
+       {
+        "c": "netsh advfirewall consec show rule name=all",
+        "n": "规则里是否要求加密与认证同时具备",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

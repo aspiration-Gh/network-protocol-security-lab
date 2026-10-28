@@ -1,0 +1,531 @@
+{
+ "id": "sava",
+ "notes": {
+  "Source Address": {
+   "short": "自填的回信地址，没有任何签名",
+   "more": "发送方构造首部时自己写，协议没有规定它必须与实际接入位置一致，也没有任何字段能证明它属于谁；上层却拿它当身份用。",
+   "sec": "整份体系的安全缺口就在这 4 个字节：身份与位置被压进了同一个字段。"
+  },
+  "Header Checksum": {
+   "short": "只是反码求和，人人可重算",
+   "more": "只对首部 20 字节做反码求和，保证比特传输没出错；改完源地址顺手重算一次，报文就完全合法。",
+   "sec": "最容易被误读的字段：它防误码，不防伪造。"
+  },
+  "Type": {
+   "short": "回显请求 8，应答确定且立刻返回",
+   "more": "ICMP 类型 8 是回显请求、0 是回显应答；请求小、应答确定且立即返回，因此最适合被借来当反射器。",
+   "sec": "28 字节的请求换回 28 字节以上的应答，放大倍数再乘以反射器数量。"
+  }
+ },
+ "acts": [
+  {
+   "key": "normal",
+   "no": "第 1 幕",
+   "title": "它正常怎么工作",
+   "desc": "四个字节既当位置又当身份，而它由发送方自己写",
+   "lead": "这一幕不讲报文细节，只回答一个问题：包里的「谁发的」，凭什么被相信？",
+   "scenes": [
+    {
+     "name": "源地址只是一个备注",
+     "steps": [
+      {
+       "who": "主机",
+       "to": "网关",
+       "pkt": 0,
+       "bubble": "src 192.0.2.66",
+       "hl": [
+        "Source Address",
+        "Header Checksum"
+       ],
+       "vals": {
+        "Source Address": "192.0.2.66（自己填）",
+        "Header Checksum": "改完重算即可"
+       },
+       "say": "首部里唯一承担身份的是源地址，可它由发送方自己写。",
+       "sub": "协议没规定它必须与实际接入位置一致。"
+      },
+      {
+       "who": "网关",
+       "to": "下一跳",
+       "pkt": 0,
+       "bubble": "只查目的地址",
+       "hl": [
+        "Destination Address",
+        "TTL"
+       ],
+       "vals": {
+        "Destination Address": "198.51.100.9",
+        "TTL": "64 → 63"
+       },
+       "say": "转发只按目的地址查表，源地址对路由决策毫无影响。",
+       "sub": "出口不看源地址，包照样能送出去。"
+      },
+      {
+       "who": "受害者",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "四元组当身份",
+       "hl": [
+        "Source Address",
+        "Destination Address"
+       ],
+       "vals": {
+        "Source Address": "被当作对端标识",
+        "Destination Address": "只当回程依据"
+       },
+       "say": "TCP 四元组、DNS 应答匹配、防火墙白名单，全都拿 IP 当身份。",
+       "sub": "地址同时扮演位置与身份，网络只记录了位置的一角。"
+      },
+      {
+       "who": "伪造者",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "改一个字段",
+       "hl": [
+        "IPv4 Header（前 12 字节）",
+        "Source Address"
+       ],
+       "vals": {
+        "IPv4 Header（前 12 字节）": "校验和重算 0x3436",
+        "Source Address": "换成 198.51.100.9"
+       },
+       "say": "造一个伪造包只需改源地址一个字段，校验和顺手重算。",
+       "sub": "构造成本几乎为零，这就是廉价攻击前提。"
+      },
+      {
+       "who": "测量方",
+       "to": "互联网",
+       "pkt": 0,
+       "bubble": "21% 仍可伪造",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "21.1% 地址块可伪造"
+       },
+       "say": "CAIDA 2021 年测量：约 21% 的 IPv4 地址块仍能把伪造源送出去。",
+       "sub": "部署者付成本、受益的是别人，二十多年没填平。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ip -4 addr show",
+        "n": "看本机地址：配什么就填什么，源地址没有任何签名",
+        "s": "补充（iproute2，仓库未收录）"
+       },
+       {
+        "c": "sudo tcpdump -ni eth0 -c 5 'icmp[icmptype] == 8' -vv",
+        "n": "看回显请求的源地址：谁填的都能发出去",
+        "s": "补充（tcpdump，仓库未收录）"
+       },
+       {
+        "c": "ping -c1 -I 10.0.0.99 198.51.100.9",
+        "n": "-I 指定一个不属于本机的源地址，发得出去说明本地不校验",
+        "s": "补充（ping -I 指定源地址）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv4",
+        "n": "看本机地址与前缀长度，源地址就是从这里取的自填值",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "ipconfig",
+        "n": "看地址、掩码、网关；首部源地址由主机自己写入",
+        "s": "《系统》Windows CMD.md · ipconfig"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "attack",
+   "no": "第 2 幕",
+   "title": "它会被怎么打",
+   "desc": "随机源地址换流量，特定源地址换信任",
+   "lead": "同一处缺口有两种用法：一个把回包全引向别人，一个借别人的身份进门。",
+   "scenes": [
+    {
+     "name": "伪造源地址反射放大",
+     "steps": [
+      {
+       "who": "攻击者",
+       "to": "接入交换机",
+       "pkt": 1,
+       "bubble": "src = 受害者",
+       "evil": true,
+       "hl": [
+        "Source Address",
+        "Destination Address"
+       ],
+       "vals": {
+        "Source Address": "198.51.100.9（受害者）",
+        "Destination Address": "反射器"
+       },
+       "say": "构造回显请求，源地址填受害者，接入层只按目的 MAC 转发。",
+       "sub": "没有绑定表，源地址不受任何检查。"
+      },
+      {
+       "who": "接入交换机",
+       "to": "边界路由器",
+       "pkt": 1,
+       "bubble": "原样转发",
+       "hl": [
+        "Source Address",
+        "Type"
+       ],
+       "vals": {
+        "Source Address": "仍是 198.51.100.9",
+        "Type": "8 回显请求"
+       },
+       "say": "出口没做 Ingress Filtering 也没做 uRPF，伪造包顺利出网。",
+       "sub": "网关只关心目的地可达，不问来源归属。"
+      },
+      {
+       "who": "边界路由器",
+       "to": "反射器",
+       "pkt": 1,
+       "bubble": "查表转发",
+       "hl": [
+        "Destination Address",
+        "Checksum"
+       ],
+       "vals": {
+        "Destination Address": "开放 DNS/NTP/SNMP",
+        "Checksum": "0xf7f7 合法"
+       },
+       "say": "送到开放服务；校验和合法，过滤设备也挑不出毛病。",
+       "sub": "互联网上愿意义务代答的机器很多。"
+      },
+      {
+       "who": "反射器",
+       "to": "受害者",
+       "pkt": 1,
+       "bubble": "Echo Reply",
+       "hl": [
+        "Source Address",
+        "Type"
+       ],
+       "vals": {
+        "Source Address": "反射器地址",
+        "Type": "0 回显应答"
+       },
+       "say": "响应远大于请求，全部打向被伪造的源。",
+       "sub": "放大倍数乘以反射器数量，就是受害者的入向流量。"
+      },
+      {
+       "who": "受害者",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "追溯断链",
+       "hl": [
+        "Sequence Number"
+       ],
+       "vals": {
+        "Sequence Number": "递增，像正常探测"
+       },
+       "say": "日志里的源地址全是无辜第三方，追溯在这里断链。",
+       "sub": "受害者无法区分正常探测与攻击回包。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "sudo hping3 --icmp -a 198.51.100.9 -c 1000 203.0.113.20",
+        "n": "-a 伪造源地址，1000 个回显请求让反射器全回给受害者",
+        "s": "补充（hping3 伪造源地址）"
+       },
+       {
+        "c": "sudo tcpdump -ni eth0 'icmp and src 203.0.113.20' -c 3 -vv",
+        "n": "抓反射回来的回显应答，确认请求小、响应大",
+        "s": "补充（tcpdump，仓库未收录）"
+       },
+       {
+        "c": "cat /proc/sys/net/ipv4/conf/all/rp_filter",
+        "n": "0 表示本机没开反向路径校验，伪造包才能出网",
+        "s": "补充（内核参数，rp_filter）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Test-Connection 203.0.113.20 -Count 1 -Quiet",
+        "n": "先确认反射器可达，不回显也得能到",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "tracert -d 203.0.113.20",
+        "n": "看包到反射器经几跳，路径上的出口是否做源地址过滤一看便知",
+        "s": "《系统》Windows CMD.md · tracert"
+       }
+      ]
+     }
+    },
+    {
+     "name": "伪造特定地址借信任",
+     "steps": [
+      {
+       "who": "管理员",
+       "to": "接入交换机",
+       "pkt": 0,
+       "bubble": "只在一个院系启用",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "绑定表只覆盖部分端口"
+       },
+       "say": "增量部署的中间态：一个院系开了 SAVI，其余子网暂缓。",
+       "sub": "验证边界与管理边界没对齐，缺口就出现在这里。"
+      },
+      {
+       "who": "攻击者",
+       "to": "未部署子网",
+       "pkt": 1,
+       "bubble": "接老交换机",
+       "evil": true,
+       "hl": [
+        "Source Address",
+        "Destination Address"
+       ],
+       "vals": {
+        "Source Address": "10.20.30.66（借来的）",
+        "Destination Address": "内网服务器"
+       },
+       "say": "从没部署验证的老接入交换机进来，源地址不受任何检查。",
+       "sub": "伪造一个「内部」地址的成本只是配一次。"
+      },
+      {
+       "who": "核心路由器",
+       "to": "目标服务器",
+       "pkt": 0,
+       "bubble": "前缀校验通过",
+       "hl": [
+        "Source Address",
+        "Protocol"
+       ],
+       "vals": {
+        "Source Address": "10.20.30.66 属于本域",
+        "Protocol": "6（TCP）"
+       },
+       "say": "域内层只判断「是否属于本域前缀」，判定合法，照转。",
+       "sub": "粒度是前缀而不是主机，看不出是谁在用。"
+      },
+      {
+       "who": "目标服务器",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "当作可信主机",
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "命中 IP 白名单"
+       },
+       "say": "基于源 IP 的白名单放行，伪造者获得了内部身份。",
+       "sub": "早期 rlogin/rsh 的主机信任也是同一套逻辑。"
+      },
+      {
+       "who": "攻击者",
+       "to": "目标服务器",
+       "pkt": 1,
+       "bubble": "以内部身份操作",
+       "evil": true,
+       "hl": [
+        "Source Address",
+        "Type"
+       ],
+       "vals": {
+        "Source Address": "10.20.30.66",
+        "Type": "借信任下发指令"
+       },
+       "say": "先让被冒充者沉默，再猜连接标识与序列号，以它的地址下指令。",
+       "sub": "上层协议认为这是老朋友，不会二次验证。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ip route get 10.20.30.66",
+        "n": "看这个借来的地址从哪条路由走，判断域内层会怎么判",
+        "s": "补充（iproute2，仓库未收录）"
+       },
+       {
+        "c": "sudo ip -4 addr add 10.20.30.66/24 dev eth0",
+        "n": "在本机网卡上配一个不属于自己的地址，这是伪造的工程形态",
+        "s": "补充（iproute2，仓库未收录）"
+       },
+       {
+        "c": "curl -s -m 3 --interface 10.20.30.66 http://10.20.30.10/",
+        "n": "--interface 指定源地址，服务器按 IP 白名单会把它当内网主机",
+        "s": "补充（curl 指定源地址）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetIPAddress -AddressFamily IPv4 | Select-Object IPAddress, PrefixLength",
+        "n": "确认本机已经用上了借来的地址",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "arp -a",
+        "n": "看网关 MAC；伪造地址后回包仍发到本机，说明二层没拦住",
+        "s": "《系统》Windows CMD.md · arp"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "key": "defend",
+   "no": "第 3 幕",
+   "title": "防护在哪一步掐断它",
+   "desc": "SAVI 绑定表在接入层逐包比对，边界再兜一层",
+   "lead": "不看主机自称什么，只看网络分配了什么、从哪个端口进来。",
+   "scenes": [
+    {
+     "name": "SAVI 绑定表挡住伪造源",
+     "steps": [
+      {
+       "who": "主机 A",
+       "to": "SAVI 交换机",
+       "pkt": 0,
+       "bubble": "申请地址",
+       "hl": [
+        "Source Address",
+        "Protocol"
+       ],
+       "vals": {
+        "Source Address": "DHCPv6 / ND 申请",
+        "Protocol": "17（UDP）"
+       },
+       "say": "先按正常流程申请地址，交换机旁路监听分配报文。",
+       "sub": "不听主机「自称」，只听网络「分配」。"
+      },
+      {
+       "who": "SAVI 交换机",
+       "to": "绑定表",
+       "pkt": 0,
+       "bubble": "写绑定",
+       "hl": [
+        "Source Address",
+        "Flags / Fragment Offset"
+       ],
+       "vals": {
+        "Source Address": "10.20.30.66 ↔ Gi1/0/3 + MAC",
+        "Flags / Fragment Offset": "暂不生效，等 DAD"
+       },
+       "say": "把分配出去的地址与端口、MAC、VLAN 这些绑定锚写进表。",
+       "sub": "分配出去不等于可用，还要等重复地址检测。"
+      },
+      {
+       "who": "主机 A",
+       "to": "SAVI 交换机",
+       "pkt": 0,
+       "bubble": "DAD 静默期满",
+       "hl": [
+        "Source Address",
+        "Destination Address"
+       ],
+       "vals": {
+        "Source Address": "10.20.30.66",
+        "Destination Address": "网关"
+       },
+       "say": "静默期内没收到邻居通告，绑定才生效，合法包逐包核对通过。",
+       "sub": "把「唯一性」也一起纳进了验证。"
+      },
+      {
+       "who": "攻击者",
+       "to": "SAVI 交换机",
+       "pkt": 1,
+       "bubble": "伪造源再来一次",
+       "evil": true,
+       "hl": [
+        "Source Address"
+       ],
+       "vals": {
+        "Source Address": "198.51.100.9（伪造）"
+       },
+       "say": "同样的伪造包重放：源地址与入端口的绑定锚对不上。",
+       "sub": "越靠近主机，看到的分配过程越完整，越难骗。"
+      },
+      {
+       "who": "SAVI 交换机",
+       "to": "—",
+       "pkt": 1,
+       "bubble": "丢弃并计数",
+       "hl": [
+        "Source Address",
+        "Type"
+       ],
+       "vals": {
+        "Source Address": "不匹配 → 丢",
+        "Type": "8 回显请求"
+       },
+       "say": "不匹配即丢，反射流量在第一个交换机就被掐断。",
+       "sub": "代价是一张绑定表，收益是全网的追溯能力。"
+      },
+      {
+       "who": "边界路由器",
+       "to": "—",
+       "pkt": 0,
+       "bubble": "uRPF + BCP38 兜底",
+       "hl": [
+        "Source Address",
+        "Header Checksum"
+       ],
+       "vals": {
+        "Source Address": "反查路由失败即丢",
+        "Header Checksum": "校验和合法也没用"
+       },
+       "say": "接入层覆盖不到的由边界入口过滤兜底，两层互补。",
+       "sub": "静态地址与下挂子网仍是缺口，靠台账与地址域对齐。"
+      }
+     ],
+     "cmds": {
+      "linux": [
+       {
+        "c": "ip neigh show",
+        "n": "看邻居表里地址与 MAC 的绑定；SAVI 表思路相同，锚换成端口",
+        "s": "补充（iproute2，仓库未收录）"
+       },
+       {
+        "c": "sudo sysctl -w net.ipv4.conf.all.rp_filter=1",
+        "n": "打开 uRPF 严格模式：源地址反查出的出接口必须等于入接口",
+        "s": "补充（内核参数，rp_filter）"
+       },
+       {
+        "c": "sudo iptables -A INPUT -i eth0 ! -s 10.20.30.0/24 -j DROP",
+        "n": "域内层的前缀校验：这个接口上只许出现本域前缀",
+        "s": "补充（iptables 前缀过滤）"
+       }
+      ],
+      "ps": [
+       {
+        "c": "Get-NetNeighbor -AddressFamily IPv4",
+        "n": "看邻居表里 IP 与 MAC 的对应，地址被别的 MAC 占用立刻可见",
+        "s": "《系统》PowerShell.md · 10. Cmdlet 网络与系统管理"
+       }
+      ],
+      "cmd": [
+       {
+        "c": "netsh interface ipv4 show neighbors",
+        "n": "看邻居缓存里的地址与 MAC 对应，与台账比对可发现冒用",
+        "s": "《系统》Windows CMD.md · netsh"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}
